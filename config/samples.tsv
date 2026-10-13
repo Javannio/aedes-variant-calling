@@ -1,0 +1,10 @@
+# Aedes aegypti Dengue Variant Calling - Sample Sheet
+# Columns: sample, fastq_r1, fastq_r2
+# Paths can be relative to pipeline root or absolute
+# Lines starting with # are comments
+
+# Example entries (replace with your actual data):
+# sample_id    path/to/sample_R1.fastq.gz    path/to/sample_R2.fastq.gz
+AeAeg_001    data/fastq/AeAeg_001_R1.fastq.gz    data/fastq/AeAeg_001_R2.fastq.gz
+AeAeg_002    data/fastq/AeAeg_002_R1.fastq.gz    data/fastq/AeAeg_002_R2.fastq.gz
+AeAeg_003    data/fastq/AeAeg_003_R1.fastq.gz    data/fastq/AeAeg_003_R2.fastq.gz

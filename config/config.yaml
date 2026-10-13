@@ -1,0 +1,95 @@
+# Aedes aegypti Dengue Variant Calling Pipeline Configuration
+# This is a portable configuration - modify paths for your system
+
+# Reference genome settings
+reference:
+  # Path to Aedes aegypti reference genome FASTA (e.g., AaegL5.0)
+  fasta: "ref/AaegL5.0.fasta"
+  # Optional: BWA index prefix (if different from fasta basename)
+  index_prefix: "ref/AaegL5.0"
+  # Optional: known variants VCF for BQSR (if available)
+  known_variants: ""
+
+# Sample input configuration
+samples:
+  # Sample sheet file (TSV/CSV with columns: sample, fastq_r1, fastq_r2)
+  sheet: "config/samples.tsv"
+  # Alternative: directory containing FASTQ files (paired-end: *_R1_*.fastq.gz, *_R2_*.fastq.gz)
+  fastq_dir: ""
+
+# Output directories
+output:
+  base_dir: "results"
+  trimmed_dir: "trimmed"
+  aligned_dir: "aligned"
+  variant_dir: "variants"
+  qc_dir: "qc"
+  logs_dir: "logs"
+
+# Tool parameters
+tools:
+  # Threads per rule (can be overridden per-rule in Snakefile)
+  threads: 8
+  # Memory limit in GB for Java tools (GATK, etc.)
+  java_mem: "16g"
+  
+  fastp:
+    qualified_quality_phred: 20
+    length_required: 50
+    detect_adapter_for_pe: true
+    trim_front1: 0
+    trim_front2: 0
+    trim_tail1: 0
+    trim_tail2: 0
+  
+  bwa:
+    algorithm: "mem"
+    min_seed_len: 19
+    bandwidth: 100
+    max_occurrences: 10000
+  
+  samtools:
+    sort_memory: "500M"
+    markdup_rmdup: false
+  
+  gatk:
+    # HaplotypeCaller settings
+    emit_ref_confidence: "GVCF"
+    min_base_quality_score: 20
+    standard_min_confidence_threshold_for_calling: 30.0
+    # GenotypeGVCFs settings
+    genotype_min_confidence: 30.0
+  
+  bcftools:
+    # Variant filtering
+    filter_expr: "QUAL<30 || DP<10 || MQ<40 || FS>60.0 || SOR>3.0 || QD<2.0 || ReadPosRankSum<-8.0"
+    filter_name: "PASS"
+    # View settings
+    output_type: "z"
+    min_qual: 30
+
+# Pipeline execution
+execution:
+  # Use conda environments (requires --use-conda)
+  use_conda: true
+  # Conda environment file
+  conda_env: "config/environment.yaml"
+  # Dry run first
+  dry_run: false
+  # Keep intermediate files (set false to save space)
+  keep_intermediates: false
+  # Restart from specific rule
+  restart_from: ""
+
+# Quality control thresholds
+qc:
+  min_mapping_rate: 0.80
+  min_coverage_depth: 10
+  min_genome_fraction_covered: 0.80
+  max_duplicate_rate: 0.50
+
+# Reporting
+reporting:
+  multiqc: true
+  summary_table: true
+  vcf_stats: true

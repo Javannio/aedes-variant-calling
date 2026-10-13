@@ -1,0 +1,456 @@
+#!/usr/bin/env python3
+"""
+Aedes aegypti Dengue Variant Calling Pipeline
+Portable Snakemake workflow for variant calling in Aedes aegypti mosquitoes.
+
+Based on tb-genomics-pipeline structure, adapted for mosquito genomics.
+"""
+
+import os
+import yaml
+import pandas as pd
+from pathlib import Path
+
+# Load configuration
+config_file = "config/config.yaml"
+if not os.path.exists(config_file):
+    raise FileNotFoundError(f"Config file not found: {config_file}. Copy config.yaml.example to config.yaml and modify.")
+
+with open(config_file) as f:
+    config = yaml.safe_load(f)
+
+# Extract key parameters
+REF_FASTA = config["reference"]["fasta"]
+REF_INDEX = config["reference"]["index_prefix"]
+SAMPLES_SHEET = config["samples"]["sheet"]
+FASTQ_DIR = config["samples"]["fastq_dir"]
+OUT_BASE = config["output"]["base_dir"]
+TRIMMED_DIR = config["output"]["trimmed_dir"]
+ALIGNED_DIR = config["output"]["aligned_dir"]
+VARIANT_DIR = config["output"]["variant_dir"]
+QC_DIR = config["output"]["qc_dir"]
+LOGS_DIR = config["output"]["logs_dir"]
+
+THREADS = config["tools"]["threads"]
+JAVA_MEM = config["tools"]["java_mem"]
+
+FASTP_PARAMS = config["tools"]["fastp"]
+BWA_PARAMS = config["tools"]["bwa"]
+SAMTOOLS_PARAMS = config["tools"]["samtools"]
+GATK_PARAMS = config["tools"]["gatk"]
+BCFTOOLS_PARAMS = config["tools"]["bcftools"]
+
+QC_THRESHOLDS = config["qc"]
+KEEP_INTERMEDIATES = config["execution"]["keep_intermediates"]
+
+# Load samples
+def load_samples(sheet_path, fastq_dir):
+    """Load samples from sheet or auto-discover from FASTQ directory."""
+    samples = []
+    if sheet_path and os.path.exists(sheet_path):
+        df = pd.read_csv(sheet_path, sep="\t")
+        required_cols = ["sample", "fastq_r1", "fastq_r2"]
+        if not all(col in df.columns for col in required_cols):
+            raise ValueError(f"Sample sheet must have columns: {required_cols}")
+        for _, row in df.iterrows():
+            samples.append({
+                "sample": row["sample"],
+                "r1": row["fastq_r1"],
+                "r2": row["fastq_r2"]
+            })
+    elif fastq_dir and os.path.exists(fastq_dir):
+        # Auto-discover paired FASTQ files
+        fastq_files = list(Path(fastq_dir).glob("*_R1_*.fastq.gz"))
+        for r1 in fastq_files:
+            sample = r1.name.split("_R1_")[0]
+            r2 = r1.parent / r1.name.replace("_R1_", "_R2_")
+            if r2.exists():
+                samples.append({"sample": sample, "r1": str(r1), "r2": str(r2)})
+            else:
+                print(f"Warning: No matching R2 for {r1}")
+    else:
+        raise ValueError("No samples found. Provide samples.tsv or fastq_dir in config.")
+    return samples
+
+SAMPLES = load_samples(SAMPLES_SHEET, FASTQ_DIR)
+SAMPLE_NAMES = [s["sample"] for s in SAMPLES]
+
+# Rule all - define final outputs
+rule all:
+    input:
+        # MultiQC report
+        f"{QC_DIR}/multiqc_report.html",
+        # Per-sample variant calls
+        expand(f"{VARIANT_DIR}/{{sample}}.filtered.vcf.gz", sample=SAMPLE_NAMES),
+        expand(f"{VARIANT_DIR}/{{sample}}.filtered.vcf.gz.tbi", sample=SAMPLE_NAMES),
+        # Per-sample alignment QC
+        expand(f"{QC_DIR}/flagstat/{{sample}}.flagstat.txt", sample=SAMPLE_NAMES),
+        expand(f"{QC_DIR}/coverage/{{sample}}.coverage.txt", sample=SAMPLE_NAMES),
+        expand(f"{QC_DIR}/fastp/{{sample}}_fastp.html", sample=SAMPLE_NAMES),
+        # Summary tables
+        f"{VARIANT_DIR}/variant_summary.tsv",
+        f"{QC_DIR}/alignment_summary.tsv"
+
+# Helper: get sample info
+def get_sample_info(wildcards):
+    for s in SAMPLES:
+        if s["sample"] == wildcards.sample:
+            return s
+    raise ValueError(f"Sample {wildcards.sample} not found in config")
+
+# 1. FASTQ Quality Control & Trimming with fastp
+rule fastp:
+    input:
+        r1 = lambda wildcards: get_sample_info(wildcards)["r1"],
+        r2 = lambda wildcards: get_sample_info(wildcards)["r2"]
+    output:
+        r1 = temp(f"{TRIMMED_DIR}/{{sample}}_R1.trim.fastq.gz"),
+        r2 = temp(f"{TRIMMED_DIR}/{{sample}}_R2.trim.fastq.gz"),
+        html = f"{QC_DIR}/fastp/{{sample}}_fastp.html",
+        json = f"{QC_DIR}/fastp/{{sample}}_fastp.json"
+    threads: THREADS
+    log: f"{LOGS_DIR}/fastp/{{sample}}.log"
+    conda: "../config/environment.yaml"
+    shell:
+        """
+        mkdir -p {QC_DIR}/fastp {TRIMMED_DIR} {LOGS_DIR}/fastp
+        
+        fastp \
+            -i {input.r1} -I {input.r2} \
+            -o {output.r1} -O {output.r2} \
+            -h {output.html} -j {output.json} \
+            --thread {threads} \
+            --qualified_quality_phred {FASTP_PARAMS.qualified_quality_phred} \
+            --length_required {FASTP_PARAMS.length_required} \
+            {"--detect_adapter_for_pe" if FASTP_PARAMS.detect_adapter_for_pe else ""} \
+            --trim_front1 {FASTP_PARAMS.trim_front1} \
+            --trim_front2 {FASTP_PARAMS.trim_front2} \
+            --trim_tail1 {FASTP_PARAMS.trim_tail1} \
+            --trim_tail2 {FASTP_PARAMS.trim_tail2} \
+            2> {log}
+        """
+
+# 2. Reference genome indexing (run once)
+rule bwa_index:
+    input: REF_FASTA
+    output:
+        fa = f"{REF_INDEX}.fa",
+        amb = f"{REF_INDEX}.amb",
+        ann = f"{REF_INDEX}.ann",
+        bwt = f"{REF_INDEX}.bwt",
+        pac = f"{REF_INDEX}.pac",
+        sa = f"{REF_INDEX}.sa"
+    log: f"{LOGS_DIR}/bwa_index.log"
+    conda: "../config/environment.yaml"
+    shell:
+        """
+        mkdir -p {LOGS_DIR}
+        if [ ! -f {REF_INDEX}.bwt ]; then
+            bwa index -p {REF_INDEX} {input} 2> {log}
+        else
+            echo "BWA index already exists, skipping" > {log}
+        fi
+        """
+
+# 3. Alignment with BWA-MEM, sorting, and duplicate marking
+rule align_and_markdup:
+    input:
+        r1 = f"{TRIMMED_DIR}/{{sample}}_R1.trim.fastq.gz",
+        r2 = f"{TRIMMED_DIR}/{{sample}}_R2.trim.fastq.gz",
+        ref = REF_FASTA
+    output:
+        bam = f"{ALIGNED_DIR}/{{sample}}.markdup.bam",
+        bai = f"{ALIGNED_DIR}/{{sample}}.markdup.bam.bai"
+    threads: THREADS
+    log: f"{LOGS_DIR}/align/{{sample}}.log"
+    conda: "../config/environment.yaml"
+    shell:
+        """
+        mkdir -p {ALIGNED_DIR} {LOGS_DIR}/align
+        
+        # BWA-MEM alignment with read group
+        RG="@RG\\tID:{wildcards.sample}\\tSM:{wildcards.sample}\\tPL:ILLUMINA\\tLB:{wildcards.sample}"
+        
+        bwa mem \
+            -t {threads} \
+            -k {BWA_PARAMS.min_seed_len} \
+            -w {BWA_PARAMS.bandwidth} \
+            -K {BWA_PARAMS.max_occurrences} \
+            -R "{RG}" \
+            {input.ref} {input.r1} {input.r2} | \
+        samtools sort \
+            -@{threads} \
+            -m {SAMTOOLS_PARAMS.sort_memory} \
+            -n - | \
+        samtools fixmate \
+            -m - - | \
+        samtools sort \
+            -@{threads} \
+            -m {SAMTOOLS_PARAMS.sort_memory} \
+            - | \
+        samtools markdup \
+            -@{threads} \
+            {"-r" if SAMTOOLS_PARAMS.markdup_rmdup else ""} \
+            - {output.bam}
+        
+        samtools index -@{threads} {output.bam}
+        """ 2> {log}
+
+# 4. Alignment QC: Flagstat
+rule flagstat:
+    input: bam = f"{ALIGNED_DIR}/{{sample}}.markdup.bam"
+    output: f"{QC_DIR}/flagstat/{{sample}}.flagstat.txt"
+    threads: 2
+    log: f"{LOGS_DIR}/flagstat/{{sample}}.log"
+    conda: "../config/environment.yaml"
+    shell:
+        """
+        mkdir -p {QC_DIR}/flagstat {LOGS_DIR}/flagstat
+        samtools flagstat -@{threads} {input.bam} > {output} 2> {log}
+        """
+
+# 5. Alignment QC: Coverage
+rule coverage:
+    input: bam = f"{ALIGNED_DIR}/{{sample}}.markdup.bam"
+    output: f"{QC_DIR}/coverage/{{sample}}.coverage.txt"
+    threads: 2
+    log: f"{LOGS_DIR}/coverage/{{sample}}.log"
+    conda: "../config/environment.yaml"
+    shell:
+        """
+        mkdir -p {QC_DIR}/coverage {LOGS_DIR}/coverage
+        samtools coverage {input.bam} > {output} 2> {log}
+        """
+
+# 6. Base Quality Score Recalibration (BQSR) - optional if known variants available
+rule bqsr:
+    input:
+        bam = f"{ALIGNED_DIR}/{{sample}}.markdup.bam",
+        ref = REF_FASTA,
+        known = config["reference"]["known_variants"] if config["reference"]["known_variants"] else REF_FASTA
+    output:
+        recal_table = temp(f"{ALIGNED_DIR}/{{sample}}.recal.table"),
+        bam = f"{ALIGNED_DIR}/{{sample}}.recal.bam",
+        bai = f"{ALIGNED_DIR}/{{sample}}.recal.bam.bai"
+    threads: THREADS
+    log: f"{LOGS_DIR}/bqsr/{{sample}}.log"
+    conda: "../config/environment.yaml"
+    shell:
+        """
+        mkdir -p {ALIGNED_DIR} {LOGS_DIR}/bqsr
+        
+        # BaseRecalibrator
+        gatk --java-options "-Xmx{JAVA_MEM}" BaseRecalibrator \
+            -R {input.ref} \
+            -I {input.bam} \
+            --known-sites {input.known} \
+            -O {output.recal_table} \
+            2> {log}
+        
+        # ApplyBQSR
+        gatk --java-options "-Xmx{JAVA_MEM}" ApplyBQSR \
+            -R {input.ref} \
+            -I {input.bam} \
+            --bqsr-recal-file {output.recal_table} \
+            -O {output.bam} \
+            2>> {log}
+        
+        samtools index -@{threads} {output.bam}
+        """
+
+# 7. Variant Calling with GATK HaplotypeCaller (GVCF mode)
+rule haplotype_caller:
+    input:
+        bam = f"{ALIGNED_DIR}/{{sample}}.recal.bam",
+        ref = REF_FASTA
+    output:
+        gvcf = f"{VARIANT_DIR}/{{sample}}.g.vcf.gz",
+        tbi = f"{VARIANT_DIR}/{{sample}}.g.vcf.gz.tbi"
+    threads: THREADS
+    log: f"{LOGS_DIR}/haplotype_caller/{{sample}}.log"
+    conda: "../config/environment.yaml"
+    shell:
+        """
+        mkdir -p {VARIANT_DIR} {LOGS_DIR}/haplotype_caller
+        
+        gatk --java-options "-Xmx{JAVA_MEM}" HaplotypeCaller \
+            -R {input.ref} \
+            -I {input.bam} \
+            -O {output.gvcf} \
+            --emit-ref-confidence {GATK_PARAMS.emit_ref_confidence} \
+            --min-base-quality-score {GATK_PARAMS.min_base_quality_score} \
+            --standard-min-confidence-threshold-for-calling {GATK_PARAMS.standard_min_confidence_threshold_for_calling} \
+            --native-pair-hmm-threads {threads} \
+            2> {log}
+        
+        gatk --java-options "-Xmx{JAVA_MEM}" IndexFeatureFile -I {output.gvcf} 2>> {log}
+        """
+
+# 8. Joint Genotyping (combine all GVCFs)
+rule genotype_gvcfs:
+    input:
+        gvcfs = expand(f"{VARIANT_DIR}/{{sample}}.g.vcf.gz", sample=SAMPLE_NAMES),
+        ref = REF_FASTA
+    output:
+        vcf = f"{VARIANT_DIR}/cohort.raw.vcf.gz",
+        tbi = f"{VARIANT_DIR}/cohort.raw.vcf.gz.tbi"
+    threads: THREADS
+    log: f"{LOGS_DIR}/genotype_gvcfs.log"
+    conda: "../config/environment.yaml"
+    shell:
+        """
+        mkdir -p {VARIANT_DIR} {LOGS_DIR}
+        
+        # Create GVCF list
+        echo {input.gvcfs} | tr ' ' '\\n' > {VARIANT_DIR}/gvcf.list
+        
+        gatk --java-options "-Xmx{JAVA_MEM}" GenotypeGVCFs \
+            -R {input.ref} \
+            -V {VARIANT_DIR}/gvcf.list \
+            -O {output.vcf} \
+            --genotype-min-confidence {GATK_PARAMS.genotype_min_confidence} \
+            2> {log}
+        
+        gatk --java-options "-Xmx{JAVA_MEM}" IndexFeatureFile -I {output.vcf} 2>> {log}
+        rm {VARIANT_DIR}/gvcf.list
+        """
+
+# 9. Variant Filtering (VQSR or hard filters)
+rule filter_variants:
+    input:
+        vcf = f"{VARIANT_DIR}/cohort.raw.vcf.gz",
+        ref = REF_FASTA
+    output:
+        vcf = f"{VARIANT_DIR}/cohort.filtered.vcf.gz",
+        tbi = f"{VARIANT_DIR}/cohort.filtered.vcf.gz.tbi"
+    threads: THREADS
+    log: f"{LOGS_DIR}/filter_variants.log"
+    conda: "../config/environment.yaml"
+    shell:
+        """
+        mkdir -p {VARIANT_DIR} {LOGS_DIR}
+        
+        gatk --java-options "-Xmx{JAVA_MEM}" VariantFiltration \
+            -R {input.ref} \
+            -V {input.vcf} \
+            -O {output.vcf} \
+            --filter-expression "{BCFTOOLS_PARAMS.filter_expr}" \
+            --filter-name "{BCFTOOLS_PARAMS.filter_name}" \
+            2> {log}
+        
+        gatk --java-options "-Xmx{JAVA_MEM}" IndexFeatureFile -I {output.vcf} 2>> {log}
+        """
+
+# 10. Split multi-sample VCF into per-sample VCFs
+rule split_vcf:
+    input:
+        vcf = f"{VARIANT_DIR}/cohort.filtered.vcf.gz"
+    output:
+        vcf = f"{VARIANT_DIR}/{{sample}}.filtered.vcf.gz",
+        tbi = f"{VARIANT_DIR}/{{sample}}.filtered.vcf.gz.tbi"
+    threads: 2
+    log: f"{LOGS_DIR}/split_vcf/{{sample}}.log"
+    conda: "../config/environment.yaml"
+    shell:
+        """
+        mkdir -p {VARIANT_DIR} {LOGS_DIR}/split_vcf
+        
+        bcftools view \
+            -s {wildcards.sample} \
+            -O {BCFTOOLS_PARAMS.output_type} \
+            -o {output.vcf} \
+            {input.vcf} 2> {log}
+        
+        bcftools index -t {output.vcf} 2>> {log}
+        """
+
+# 11. Variant Statistics
+rule variant_stats:
+    input: vcf = f"{VARIANT_DIR}/{{sample}}.filtered.vcf.gz"
+    output: f"{VARIANT_DIR}/{{sample}}.variant_stats.txt"
+    threads: 2
+    log: f"{LOGS_DIR}/variant_stats/{{sample}}.log"
+    conda: "../config/environment.yaml"
+    shell:
+        """
+        mkdir -p {VARIANT_DIR} {LOGS_DIR}/variant_stats
+        bcftools stats {input.vcf} > {output} 2> {log}
+        """
+
+# 12. Create variant summary table
+rule variant_summary:
+    input: expand(f"{VARIANT_DIR}/{{sample}}.variant_stats.txt", sample=SAMPLE_NAMES)
+    output: f"{VARIANT_DIR}/variant_summary.tsv"
+    log: f"{LOGS_DIR}/variant_summary.log"
+    conda: "../config/environment.yaml"
+    run:
+        import re
+        summary_rows = []
+        for f in input:
+            sample = Path(f).stem.replace(".variant_stats", "")
+            with open(f) as fh:
+                for line in fh:
+                    if line.startswith("SN"):
+                        parts = line.strip().split("\t")
+                        if len(parts) >= 3:
+                            key = parts[1]
+                            val = parts[2]
+                            summary_rows.append({"sample": sample, "metric": key, "value": val})
+        df = pd.DataFrame(summary_rows)
+        df.to_csv(output[0], sep="\t", index=False)
+
+# 13. Alignment summary table
+rule alignment_summary:
+    input: expand(f"{QC_DIR}/flagstat/{{sample}}.flagstat.txt", sample=SAMPLE_NAMES)
+    output: f"{QC_DIR}/alignment_summary.tsv"
+    log: f"{LOGS_DIR}/alignment_summary.log"
+    conda: "../config/environment.yaml"
+    run:
+        import re
+        summary_rows = []
+        for f in input:
+            sample = Path(f).stem.replace(".flagstat", "")
+            with open(f) as fh:
+                for line in fh:
+                    if "mapped (" in line:
+                        # Extract mapping rate
+                        match = re.search(r"(\d+\.?\d*)%", line)
+                        if match:
+                            summary_rows.append({
+                                "sample": sample,
+                                "metric": "mapping_rate_pct",
+                                "value": match.group(1)
+                            })
+                    if "properly paired" in line.lower():
+                        match = re.search(r"(\d+\.?\d*)%", line)
+                        if match:
+                            summary_rows.append({
+                                "sample": sample,
+                                "metric": "properly_paired_pct",
+                                "value": match.group(1)
+                            })
+        df = pd.DataFrame(summary_rows)
+        df.to_csv(output[0], sep="\t", index=False)
+
+# 14. MultiQC Aggregation
+rule multiqc:
+    input:
+        fastp_json = expand(f"{QC_DIR}/fastp/{{sample}}_fastp.json", sample=SAMPLE_NAMES),
+        flagstat = expand(f"{QC_DIR}/flagstat/{{sample}}.flagstat.txt", sample=SAMPLE_NAMES),
+        coverage = expand(f"{QC_DIR}/coverage/{{sample}}.coverage.txt", sample=SAMPLE_NAMES),
+        variant_stats = expand(f"{VARIANT_DIR}/{{sample}}.variant_stats.txt", sample=SAMPLE_NAMES)
+    output: f"{QC_DIR}/multiqc_report.html"
+    log: f"{LOGS_DIR}/multiqc.log"
+    conda: "../config/environment.yaml"
+    shell:
+        """
+        mkdir -p {QC_DIR} {LOGS_DIR}
+        multiqc {QC_DIR}/fastp {QC_DIR}/flagstat {QC_DIR}/coverage {VARIANT_DIR} \
+            -o {QC_DIR} --force 2> {log}
+        """
+
+# Cleanup intermediate files if not keeping them
+if not KEEP_INTERMEDIATES:
+    # fastp outputs are temp (auto-cleaned)
+    # bqsr recal_table is temp
+    pass

@@ -1,0 +1,68 @@
+# Aedes aegypti Variant Calling - Local Configuration Example
+# Copy this to config/config.local.yaml and modify for your system
+# Then run: snakemake --configfile config/config.local.yaml --use-conda --cores 16
+
+reference:
+  # Update these paths to your reference genome location
+  fasta: "/path/to/ref/AaegL5.0.fasta"
+  index_prefix: "/path/to/ref/AaegL5.0"
+  # Optional: known variants VCF for BQSR (if available)
+  known_variants: ""
+
+samples:
+  # Option 1: Sample sheet (TSV with columns: sample, fastq_r1, fastq_r2)
+  sheet: "config/samples.tsv"
+  # Option 2: Auto-discover from directory (uncomment and comment out sheet above)
+  # fastq_dir: "data/fastq"
+
+output:
+  base_dir: "results"
+  trimmed_dir: "trimmed"
+  aligned_dir: "aligned"
+  variant_dir: "variants"
+  qc_dir: "qc"
+  logs_dir: "logs"
+
+tools:
+  threads: 16
+  java_mem: "32g"
+  
+  fastp:
+    qualified_quality_phred: 20
+    length_required: 50
+    detect_adapter_for_pe: true
+  
+  bwa:
+    algorithm: "mem"
+  
+  samtools:
+    sort_memory: "1G"
+    markdup_rmdup: false
+  
+  gatk:
+    emit_ref_confidence: "GVCF"
+    min_base_quality_score: 20
+    standard_min_confidence_threshold_for_calling: 30.0
+    genotype_min_confidence: 30.0
+  
+  bcftools:
+    filter_expr: "QUAL<30 || DP<10 || MQ<40 || FS>60.0 || SOR>3.0 || QD<2.0 || ReadPosRankSum<-8.0"
+    filter_name: "PASS"
+    output_type: "z"
+
+execution:
+  use_conda: true
+  conda_env: "config/environment.yaml"
+  dry_run: false
+  keep_intermediates: false
+
+qc:
+  min_mapping_rate: 0.80
+  min_coverage_depth: 10
+  min_genome_fraction_covered: 0.80
+  max_duplicate_rate: 0.50
+
+reporting:
+  multiqc: true
+  summary_table: true
+  vcf_stats: true

@@ -1,0 +1,34 @@
+name: aedes-variant-calling
+channels:
+  - bioconda
+  - conda-forge
+dependencies:
+  # Core workflow
+  - snakemake-minimal=8.15
+  - python=3.11
+  - pyyaml
+  - pandas
+
+  # Quality control & trimming
+  - fastp=0.23.4
+
+  # Alignment
+  - bwa=0.7.17
+  - samtools=1.19
+
+  # Variant calling (GATK)
+  - gatk4=4.5.0.0
+
+  # Variant manipulation
+  - bcftools=1.19
+  - htslib=1.19
+
+  # Quality control aggregation
+  - multiqc=1.18
+
+  # Utilities
+  - pigz=2.8
+  - parallel=20230722
+
+  # Optional: for VQSR (requires known variants)
+  # - vcftools=0.1.16
