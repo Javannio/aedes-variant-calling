@@ -57,3 +57,7 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+# Local machine config and backups
+config/config.local.yaml
+Snakefile.bak
+workflow/Snakefile.bak
