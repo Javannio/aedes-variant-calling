@@ -1,22 +1,33 @@
 #!/usr/bin/env python3
 """
-Aedes aegypti Dengue Variant Calling Pipeline
+Aedes aegypti Variant Calling Pipeline
 Portable Snakemake workflow with GATK or Parabricks (GPU) support.
 """
 
 import os
+import copy
 import yaml
 import pandas as pd
 from pathlib import Path
 
-config_file = "config/config.local.yaml"
-if not os.path.exists(config_file):
-    config_file = "config/config.yaml"
-if not os.path.exists(config_file):
-    raise FileNotFoundError("Config file not found. Create config/config.local.yaml")
+def deep_merge(base, override):
+    merged = copy.deepcopy(base)
+    for key, value in (override or {}).items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
 
-with open(config_file) as f:
-    config = yaml.safe_load(f)
+config = {}
+if os.path.exists("config/config.yaml"):
+    with open("config/config.yaml") as f:
+        config = yaml.safe_load(f)
+if os.path.exists("config/config.local.yaml"):
+    with open("config/config.local.yaml") as f:
+        config = deep_merge(config, yaml.safe_load(f))
+if not config:
+    raise FileNotFoundError("No config found. Create config/config.local.yaml")
 
 REF_FASTA = config["reference"]["fasta"]
 REF_INDEX = config["reference"]["index_prefix"]
@@ -51,8 +62,10 @@ GATK_MBQ = config["tools"]["gatk"]["min_base_quality_score"]
 GATK_SMCT = config["tools"]["gatk"]["standard_min_confidence_threshold_for_calling"]
 GATK_GMC = config["tools"]["gatk"]["genotype_min_confidence"]
 
-BCFTOOLS_FILTER = config["tools"]["bcftools"]["filter_expr"]
-BCFTOOLS_FNAME = config["tools"]["bcftools"]["filter_name"]
+SNP_FILTER = config["tools"]["bcftools"]["snp_filter"]
+INDEL_FILTER = config["tools"]["bcftools"]["indel_filter"]
+GENO_FILTER = config["tools"]["bcftools"]["genotype_filter"]
+EXCLUDE_BED = config["reference"].get("exclude_bed", "")
 BCFTOOLS_OT = config["tools"]["bcftools"]["output_type"]
 
 # Parabricks settings
@@ -442,12 +455,20 @@ rule filter_variants:
     shell:
         """
         mkdir -p {VARIANT_DIR} {LOGS_DIR}
-        gatk --java-options "-Xmx{JAVA_MEM}" VariantFiltration \
-            -R {input.ref} -V {input.vcf} -O {output.vcf} \
-            --filter-expression '{BCFTOOLS_FILTER}' \
-            --filter-name '{BCFTOOLS_FNAME}' \
-            2> {log}
-        gatk --java-options "-Xmx{JAVA_MEM}" IndexFeatureFile -I {output.vcf} 2>> {log}
+        EXCLUDE=""
+        if [ -n "{EXCLUDE_BED}" ] && [ -f "{EXCLUDE_BED}" ]; then
+            EXCLUDE="-T ^{EXCLUDE_BED}"
+        fi
+        bcftools view -m2 -M2 -v snps $EXCLUDE -Ou {input.vcf} 2> {log} \
+            | bcftools filter -e '{SNP_FILTER}' -s SNP_HARDFAIL -Ou 2>> {log} \
+            | bcftools filter -e '{GENO_FILTER}' --set-gts . -Oz -o {VARIANT_DIR}/.snps.tmp.vcf.gz 2>> {log}
+        bcftools view -m2 -M2 -v indels $EXCLUDE -Ou {input.vcf} 2>> {log} \
+            | bcftools filter -e '{INDEL_FILTER}' -s INDEL_HARDFAIL -Ou 2>> {log} \
+            | bcftools filter -e '{GENO_FILTER}' --set-gts . -Oz -o {VARIANT_DIR}/.indels.tmp.vcf.gz 2>> {log}
+        bcftools concat -a -Oz -o {output.vcf} \
+            {VARIANT_DIR}/.snps.tmp.vcf.gz {VARIANT_DIR}/.indels.tmp.vcf.gz 2>> {log}
+        bcftools index -t -f {output.vcf}
+        rm -f {VARIANT_DIR}/.snps.tmp.vcf.gz* {VARIANT_DIR}/.indels.tmp.vcf.gz*
         """
 
 rule split_vcf:

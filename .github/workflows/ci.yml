@@ -1,0 +1,20 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  dry-run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install Snakemake
+        run: pip install "snakemake>=8" pyyaml pandas
+      - name: Validate workflow (dry run)
+        run: |
+          cp config/config.ci.yaml config/config.local.yaml
+          snakemake -n --cores 1

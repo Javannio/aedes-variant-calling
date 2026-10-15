@@ -9,6 +9,10 @@ reference:
   index_prefix: "ref/AaegL5.0"
   # Optional: known variants VCF for BQSR (if available)
   known_variants: ""
+  # Optional: BED of regions to EXCLUDE from variant filtering
+  # (e.g. RepeatMasker annotations, low-mappability regions — AaegL5 is
+  # highly repetitive, so excluding repeats removes many false positives)
+  exclude_bed: ""
 
 # Sample input configuration
 samples:
@@ -61,12 +65,14 @@ tools:
     genotype_min_confidence: 30.0
   
   bcftools:
-    # Variant filtering
-    filter_expr: "QUAL<30 || DP<10 || MQ<40 || FS>60.0 || SOR>3.0 || QD<2.0 || ReadPosRankSum<-8.0"
-    filter_name: "PASS"
+    # Site-level hard filters, applied separately to SNPs and indels
+    # (GATK best practice: different thresholds per variant type)
+    snp_filter: "QUAL<30 || MQ<40 || QD<2.0 || FS>60.0 || SOR>3.0 || ReadPosRankSum<-8.0"
+    indel_filter: "QUAL<30 || QD<2.0 || FS>200.0 || ReadPosRankSum<-20.0"
+    # Genotype-level mask: genotypes failing this are set to ./. (sites kept)
+    genotype_filter: "FMT/DP<10 || FMT/GQ<20"
     # View settings
     output_type: "z"
-    min_qual: 30
 
 # Pipeline execution
 execution:

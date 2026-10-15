@@ -1,0 +1,16 @@
+# CI config: used by .github/workflows/lint.yml for a dry-run DAG check.
+# Paths do not need to exist — snakemake -n only builds the DAG.
+reference:
+  fasta: "test/ref/tiny.fa"
+  index_prefix: "test/ref/tiny"
+  known_variants: ""
+  exclude_bed: ""
+
+samples:
+  sheet: "config/ci_samples.tsv"
+
+tools:
+  threads: 2
+  java_mem: "2g"
+  parabricks:
+    enabled: false
