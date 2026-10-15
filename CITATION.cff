@@ -1,0 +1,21 @@
+cff-version: 1.2.0
+message: "If you use this pipeline, please cite it as below."
+title: "Aedes aegypti Variant Calling Pipeline"
+authors:
+  - name: Javannio
+repository-code: "https://github.com/Javannio/aedes-variant-calling"
+url: "https://github.com/Javannio/aedes-variant-calling"
+license: MIT
+version: 0.1.0
+date-released: "2026-10-15"
+abstract: >-
+  Portable Snakemake workflow for germline variant calling in Aedes aegypti
+  from Illumina WGS data, with optional NVIDIA Parabricks DeepVariant +
+  GLnexus GPU acceleration and a GATK4 CPU fallback.
+keywords:
+  - aedes-aegypti
+  - variant-calling
+  - snakemake
+  - deepvariant
+  - gatk
+  - mosquito-genomics

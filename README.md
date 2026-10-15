@@ -7,10 +7,10 @@ A portable, reproducible Snakemake workflow for germline variant calling in *Aed
 ## Features
 
 - **Portable**: Configuration-driven via `config.yaml` + optional local overrides, works on any system with conda
-- **GPU-accelerated**: Optional [NVIDIA Parabricks](https://docs.nvidia.com/clara/parabricks) mode (DeepVariant); GATK4 CPU fallback included
+- **GPU-accelerated**: Optional [NVIDIA Parabricks](https://docs.nvidia.com/clara/parabricks) DeepVariant calling with GLnexus joint genotyping; GATK4 CPU fallback included
 - **Reproducible**: Conda environments pin exact tool versions
 - **Flexible**: Accepts FASTQ files directly or downloads from SRA
-- **Standard QC**: fastp trimming (CPU mode), read-group-tagged alignment, duplicate marking, MultiQC
+- **Standard QC**: fastp trimming (both modes), read-group-tagged alignment, duplicate marking, MultiQC
 - **Best-practice hard filtering**: SNP/indel split with type-specific thresholds; per-genotype DP/GQ masking; optional repeat-exclusion BED
 - **Comprehensive reporting**: Per-sample and cohort-level QC, variant statistics, MultiQC dashboard
 
@@ -20,7 +20,7 @@ A portable, reproducible Snakemake workflow for germline variant calling in *Aed
 FASTQ (input)
     │
     ▼
-trimming ──► trimmed FASTQ + QC          (fastp, or Parabricks fq2bam)
+trimming ──► trimmed FASTQ + QC          (fastp in both modes — fq2bam does not trim)
     │
     ▼
 alignment ──► Markdup BAM                (BWA-MEM + samtools markdup, or pbrun fq2bam;
@@ -31,18 +31,21 @@ alignment ──► Markdup BAM                (BWA-MEM + samtools markdup, or p
 BQSR (optional) ──► Recalibrated BAM     (skipped unless known-sites VCF provided)
     │
     ▼
-variant calling ──► per-sample GVCF/GVCF-like
+variant calling ──► per-sample GVCF
     │
     ├─ GPU mode:   pbrun deepvariant --gvcf
-    │                 → pbrun genotypegvcf (GVCF→VCF per sample)
-    │                 → bcftools merge (cohort VCF)
+    │                 → GLnexus (DeepVariant config; true joint genotyping)
+    │                 → cohort VCF
     │
     └─ CPU mode:   gatk HaplotypeCaller --emit-ref-confidence GVCF
-                      → gatk GenotypeGVCFs (GVCF list → cohort VCF)
+                      (scattered: balanced whole-contig chunks, gathered back)
+                      → gatk GenomicsDBImport (contig intervals merged into
+                        ~N GenomicsDB arrays — slow on fragmented refs otherwise)
+                      → gatk GenotypeGVCFs (gendb:// workspace)
     │
     ▼
 bcftools hard filtering ──► Filtered cohort VCF
-    │   - SNPs and indels filtered separately (GATK-style thresholds)
+    │   - SNPs and indels filtered separately
     │   - low-DP/low-GQ genotypes masked to ./. (not site-removed)
     │   - optional: regions in exclude_bed (e.g. RepeatMasker) skipped
     ▼
@@ -55,10 +58,11 @@ bcftools stats + MultiQC ──► Summary reports
 ### Why two genotyping paths?
 
 Parabricks DeepVariant GVCFs do not contain the `<NON_REF>` allele that GATK's
-`GenotypeGVCFs`/`GenomicsDBImport` require, so GPU mode converts each GVCF to a
-VCF with `pbrun genotypegvcf` and merges with `bcftools`. This is per-sample
-calling + merge rather than true joint genotyping; for large cohorts where
-joint calling matters, use CPU mode (GenomicsDBImport → GenotypeGVCFs).
+`GenotypeGVCFs`/`GenomicsDBImport` require, so GPU mode joint-calls with
+[GLnexus](https://github.com/dnanexus-rnd/GLnexus) (the standard DeepVariant
+cohort caller) instead. GPU mode is therefore true joint genotyping, not
+per-sample calling + merge — genotypes at sites private to another sample are
+correctly called hom-ref rather than no-call.
 
 ## Quick Start
 
@@ -161,7 +165,10 @@ cat qc/alignment_summary.tsv
 
 ## Configuration
 
-All parameters are in `config/config.yaml` (overridable in `config.local.yaml`):
+All parameters are in `config/config.yaml` (overridable in `config.local.yaml`).
+Snakemake's own `configfile:` directives handle the deep merge, and the merged
+config is validated against `workflow/schemas/config.schema.yaml` — type or
+structure mistakes fail at startup instead of mid-run:
 
 | Section | Description |
 |---------|-------------|
@@ -172,16 +179,28 @@ All parameters are in `config/config.yaml` (overridable in `config.local.yaml`):
 | `execution` | Conda usage, dry-run, intermediate file retention |
 | `qc` | Quality thresholds for reporting |
 
+CPU-mode performance knobs (both under `tools.gatk`): `hc_scatter` controls
+how many balanced whole-contig HaplotypeCaller chunks run in parallel (1 =
+disabled), and `genomicsdb_num_partitions` controls how many GenomicsDB
+arrays the contig intervals are merged into (0 = disabled; important for the
+~1,900-contig AaegL5 reference).
+
 ## Variant Filtering
 
-Hard filtering runs in `bcftools` with GATK-style thresholds, split by
-variant type (best practice — indels and SNPs have different error profiles):
+Hard filtering runs in `bcftools`, split by variant type, with **per-caller**
+defaults (selected automatically from `tools.bcftools.deepvariant` vs
+`tools.bcftools.gatk`):
 
-| Type | Default filter |
-|------|----------------|
-| SNPs | `QUAL<30 \|\| MQ<40 \|\| QD<2.0 \|\| FS>60.0 \|\| SOR>3.0 \|\| ReadPosRankSum<-8.0` |
-| Indels | `QUAL<30 \|\| QD<2.0 \|\| FS>200.0 \|\| ReadPosRankSum<-20.0` |
-| Genotypes | `FMT/DP<10 \|\| FMT/GQ<20` → masked to `./.` (site is kept) |
+| Type | DeepVariant (GPU) | GATK (CPU) |
+|------|-------------------|------------|
+| SNPs | `QUAL<30` | `QUAL<30 \|\| MQ<40 \|\| QD<2.0 \|\| FS>60.0 \|\| SOR>3.0 \|\| ReadPosRankSum<-8.0` |
+| Indels | `QUAL<30` | `QUAL<30 \|\| QD<2.0 \|\| FS>200.0 \|\| ReadPosRankSum<-20.0` |
+| Genotypes | `FMT/DP<10 \|\| FMT/GQ<20 \|\| VAF<0.2` → masked to `./.` | `FMT/DP<10 \|\| FMT/GQ<20` → masked to `./.` |
+
+GATK-only annotations (`QD`, `MQ`, `FS`, `SOR`, `ReadPosRankSum`) appear only
+in the GATK set because GenotypeGVCFs guarantees them; GLnexus output lacks
+them and missing tags make bcftools filter expressions silently pass — so the
+two callers keep separate expressions (see comments in `config.yaml`).
 
 Note: cohort-level `INFO/DP` sums depth across all samples and scales with
 cohort size — depth is therefore enforced at the **genotype** level, so a
@@ -216,11 +235,12 @@ element-rich regions.
 
 | Tool | Version | Purpose |
 |------|---------|---------|
-| fastp | 0.23.4 | Adapter trimming, QC (CPU mode) |
+| fastp | 0.23.4 | Adapter trimming, QC (both modes) |
 | BWA | 0.7.17 | Read alignment (CPU mode) |
 | samtools | 1.19 | BAM processing, QC |
 | GATK | 4.5.0.0 | HaplotypeCaller / GenotypeGVCFs (CPU mode) |
 | bcftools | 1.19 | Filtering, merging, stats |
+| GLnexus | 1.4.1 | Joint genotyping of DeepVariant gVCFs (GPU mode) |
 | MultiQC | 1.18 | Report aggregation |
 | Parabricks | 4.3.1 | fq2bam / DeepVariant (GPU mode) |
 
@@ -240,7 +260,7 @@ element-rich regions.
 │   ├── *.variant_stats.txt    # bcftools stats per sample
 │   └── variant_summary.tsv    # Cohort variant summary
 ├── qc/
-│   ├── fastp/                 # fastp HTML/JSON reports (CPU mode)
+│   ├── fastp/                 # fastp HTML/JSON reports (both modes)
 │   ├── flagstat/              # samtools flagstat
 │   ├── coverage/              # samtools coverage
 │   ├── multiqc_report.html    # Aggregated MultiQC report
@@ -260,15 +280,16 @@ reference:
   known_variants: "ref/known_variants.vcf.gz"
 ```
 
-Without this, BQSR is skipped (the markdup BAM is passed through).
+Without this, BQSR is skipped entirely — the variant callers read the
+markdup BAM directly (no copy is made).
 
 ### Adjusting Variant Filters
 
 ```yaml
 tools:
   bcftools:
-    snp_filter: "QUAL<30 || MQ<40 || QD<2.0 || FS>60.0 || SOR>3.0"
-    indel_filter: "QUAL<30 || QD<2.0 || FS>200.0"
+    snp_filter: "QUAL<30"
+    indel_filter: "QUAL<30"
     genotype_filter: "FMT/DP<10 || FMT/GQ<20"
 ```
 
@@ -288,13 +309,19 @@ snakemake --cores 32 --resources mem_mb=64000 --use-conda
 
 ## Testing
 
-CI runs a dry-run (`snakemake -n`) on every push against a tiny fixture
-dataset (`test/`, two single-read samples, 108 bp reference) to catch DAG and
-syntax breakage. To reproduce locally:
+CI runs the **full pipeline end-to-end** on every push against a tiny
+paired-end fixture dataset (`test/`: two samples, 40 read pairs each, 300 bp
+reference, one planted heterozygous SNP). The run covers trimming →
+alignment → marking → HaplotypeCaller → GenomicsDBImport → GenotypeGVCFs →
+filtering → stats → MultiQC, and fails if the planted SNP is not called.
+To reproduce locally:
 
 ```bash
+bash test/make_fixtures.sh
+bwa index test/ref/tiny.fa && samtools faidx test/ref/tiny.fa
+gatk CreateSequenceDictionary -R test/ref/tiny.fa
 cp config/config.ci.yaml config/config.local.yaml
-snakemake -n --cores 1
+snakemake --cores 2
 ```
 
 ## Provenance: Changes from tb-genomics-pipeline
@@ -306,10 +333,18 @@ and was rebuilt for mosquito genomics:
 |------|-------------|---------------|-----|
 | Reference | *M. tuberculosis* H37Rv (~4.4 Mb) | *Ae. aegypti* AaegL5.0 (~1.3 Gb) | Different organism; 300× larger, repetitive genome |
 | Calling | TB-Profiler (lineage/AMR) | DeepVariant/HaplotypeCaller germline calling | Need population variant calls, not catalogued resistance mutations |
-| Joint genotyping | N/A (isolate) | GVCF merge / GenomicsDBImport | Cohort-level analysis of related mosquitoes |
+| Joint genotyping | N/A (isolate) | GLnexus (GPU) / GenomicsDBImport (CPU) | Cohort-level analysis of related mosquitoes |
 | Filtering | Minimal (TB has low diversity) | SNP/indel split, genotype-level DP, repeat exclusion | Repetitive, heterozygous genome generates false positives |
 | Execution | CPU only | Optional Parabricks GPU mode | 1.3 Gb genome makes CPU calling slow |
 | Config | Mixed hardcoding | Deep-merged layered config | Portability across machines |
+
+## Validation Results
+
+A full 2-sample run on the real AaegL5.0 reference (GPU/Parabricks + GLnexus)
+passes sanity checks: **Ti/Tv 1.76** and **het/hom 0.59** on the PASS set
+(329,239 sites). See [`docs/validation.md`](docs/validation.md) for all
+metrics and the commands to reproduce them; the earlier pre-GLnexus run is in
+[`docs/run_results.md`](docs/run_results.md).
 
 ## Troubleshooting
 

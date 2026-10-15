@@ -1,0 +1,91 @@
+$schema: "http://json-schema.org/draft-07/schema#"
+title: Aedes aegypti variant calling pipeline configuration
+description: >
+  Validated by snakemake's validate() against config/config.yaml after
+  config/config.local.yaml has been deep-merged on top. Unknown keys are
+  allowed, so local configs may carry extra settings.
+type: object
+required: [reference, samples, output, tools]
+properties:
+  reference:
+    type: object
+    required: [fasta]
+    properties:
+      fasta: {type: string, minLength: 1}
+      index_prefix: {type: string}
+      known_variants: {type: string}
+      exclude_bed: {type: string}
+  samples:
+    type: object
+    properties:
+      sheet: {type: string}
+      fastq_dir: {type: string}
+  output:
+    type: object
+    required: [trimmed_dir, aligned_dir, variant_dir, qc_dir, logs_dir]
+    properties:
+      base_dir: {type: string}
+      trimmed_dir: {type: string}
+      aligned_dir: {type: string}
+      variant_dir: {type: string}
+      qc_dir: {type: string}
+      logs_dir: {type: string}
+  tools:
+    type: object
+    required: [threads, java_mem]
+    properties:
+      threads: {type: integer, minimum: 1}
+      java_mem: {type: string}
+      fastp:
+        type: object
+        properties:
+          qualified_quality_phred: {type: integer}
+          length_required: {type: integer}
+          detect_adapter_for_pe: {type: boolean}
+          trim_front1: {type: integer}
+          trim_front2: {type: integer}
+          trim_tail1: {type: integer}
+          trim_tail2: {type: integer}
+      bwa:
+        type: object
+        properties:
+          algorithm: {type: string}
+          min_seed_len: {type: integer}
+          bandwidth: {type: integer}
+          max_occurrences: {type: integer}
+      samtools:
+        type: object
+        properties:
+          sort_memory: {type: string}
+          markdup_rmdup: {type: boolean}
+      gatk:
+        type: object
+        properties:
+          emit_ref_confidence: {type: string}
+          min_base_quality_score: {type: number}
+          standard_min_confidence_threshold_for_calling: {type: number}
+          hc_scatter: {type: integer, minimum: 1}
+          genomicsdb_num_partitions: {type: integer, minimum: 0}
+      bcftools:
+        type: object
+        properties:
+          output_type: {type: string}
+          deepvariant: {$ref: "#/definitions/filterSet"}
+          gatk: {$ref: "#/definitions/filterSet"}
+      parabricks:
+        type: object
+        properties:
+          enabled: {type: boolean}
+          image: {type: string}
+          mode: {type: string, enum: [deepvariant, haplotypecaller]}
+          use_existing_bam: {type: boolean}
+  execution: {type: object}
+  qc: {type: object}
+  reporting: {type: object}
+definitions:
+  filterSet:
+    type: object
+    properties:
+      snp_filter: {type: string}
+      indel_filter: {type: string}
+      genotype_filter: {type: string}

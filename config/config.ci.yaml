@@ -1,8 +1,8 @@
-# CI config: used by .github/workflows/lint.yml for a dry-run DAG check.
-# Paths do not need to exist — snakemake -n only builds the DAG.
+# CI config: copied to config/config.local.yaml by .github/workflows/ci.yml.
+# Merged over config/config.yaml (deep merge), so only overrides live here.
 reference:
   fasta: "test/ref/tiny.fa"
-  index_prefix: "test/ref/tiny"
+  index_prefix: "test/ref/tiny.fa"
   known_variants: ""
   exclude_bed: ""
 

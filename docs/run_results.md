@@ -2,6 +2,11 @@
 
 First end-to-end run of the pipeline in GPU (Parabricks) mode.
 
+> **Note:** genotyping in this run used the since-replaced
+> `pbrun genotypegvcf` + `bcftools merge` approach. The pipeline now uses
+> **GLnexus** (`glnexus_cli --config DeepVariant`) for joint genotyping; the
+> numbers below will be refreshed after the next full run.
+
 ## Environment
 
 - Hardware: NVIDIA RTX 3060 (12 GB VRAM), driver 616.92, CUDA 13.4; WSL2 Ubuntu, ~15 GB RAM allocated to WSL
@@ -61,5 +66,5 @@ but keeps all cohort sites (union callset of 150,433 records).
 
 - BQSR is a stub; provide a known-sites resource (e.g. dbSNP for Ae. aegypti) for real recalibration.
 - Per-sample VCFs contain all cohort sites; add `--trim-alt-alleles -c1` to `split_vcf` for sample-specific callsets.
-- Per-sample genotyping + merge is used instead of true joint genotyping (DeepVariant GVCF constraint).
+- `bcftools merge` (used for the numbers above) produced `./.` no-calls where hom-ref was correct; GLnexus replaces it.
 - Conda channel priority is not strict (`conda config --set channel_priority strict` recommended).

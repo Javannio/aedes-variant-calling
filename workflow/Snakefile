@@ -5,32 +5,31 @@ Portable Snakemake workflow with GATK or Parabricks (GPU) support.
 """
 
 import os
-import copy
-import yaml
+import re
 import pandas as pd
 from pathlib import Path
+from snakemake.utils import validate
 
-def deep_merge(base, override):
-    merged = copy.deepcopy(base)
-    for key, value in (override or {}).items():
-        if isinstance(value, dict) and isinstance(merged.get(key), dict):
-            merged[key] = deep_merge(merged[key], value)
-        else:
-            merged[key] = value
-    return merged
-
-config = {}
-if os.path.exists("config/config.yaml"):
-    with open("config/config.yaml") as f:
-        config = yaml.safe_load(f)
+# Loads config/config.yaml, then deep-merges config/config.local.yaml when
+# present. Both CLI overrides work as usual: --config KEY=VALUE and
+# --configfile <extra.yaml> (applied on top).
+configfile: "config/config.yaml"
 if os.path.exists("config/config.local.yaml"):
-    with open("config/config.local.yaml") as f:
-        config = deep_merge(config, yaml.safe_load(f))
-if not config:
-    raise FileNotFoundError("No config found. Create config/config.local.yaml")
+    configfile: "config/config.local.yaml"
+
+validate(config, "schemas/config.schema.yaml")
 
 REF_FASTA = config["reference"]["fasta"]
-REF_INDEX = config["reference"]["index_prefix"]
+REF_ABS = os.path.abspath(REF_FASTA)
+REF_DIR = os.path.dirname(REF_ABS)
+REF_INDEX = config["reference"].get("index_prefix") or REF_ABS
+REF_FAI = f"{REF_ABS}.fai"
+REF_DICT = f"{os.path.splitext(REF_ABS)[0]}.dict"
+BWA_INDEX_FILES = expand(f"{REF_INDEX}.{{ext}}", ext=["amb", "ann", "bwt", "pac", "sa"])
+KNOWN_VARIANTS = (config["reference"].get("known_variants") or "").strip()
+USE_BQSR = bool(KNOWN_VARIANTS) and os.path.exists(KNOWN_VARIANTS)
+if KNOWN_VARIANTS and not USE_BQSR:
+    print(f"Warning: known_variants not found ({KNOWN_VARIANTS}) — BQSR will be skipped")
 SAMPLES_SHEET = config["samples"]["sheet"]
 FASTQ_DIR = config["samples"]["fastq_dir"]
 TRIMMED_DIR = config["output"]["trimmed_dir"]
@@ -38,6 +37,10 @@ ALIGNED_DIR = config["output"]["aligned_dir"]
 VARIANT_DIR = config["output"]["variant_dir"]
 QC_DIR = config["output"]["qc_dir"]
 LOGS_DIR = config["output"]["logs_dir"]
+
+# BAM consumed by the variant callers: recalibrated when BQSR runs with a
+# known-sites resource, otherwise the markdup BAM directly (no copy step).
+CALL_BAM = f"{ALIGNED_DIR}/{{sample}}.recal.bam" if USE_BQSR else f"{ALIGNED_DIR}/{{sample}}.markdup.bam"
 
 THREADS = config["tools"]["threads"]
 JAVA_MEM = config["tools"]["java_mem"]
@@ -52,7 +55,7 @@ FASTP_TT2 = config["tools"]["fastp"]["trim_tail2"]
 
 BWA_K = config["tools"]["bwa"]["min_seed_len"]
 BWA_W = config["tools"]["bwa"]["bandwidth"]
-BWA_KK = config["tools"]["bwa"]["max_occurrences"]
+BWA_C = config["tools"]["bwa"]["max_occurrences"]  # bwa mem -c (seed occurrence cap)
 
 SAMTOOLS_MEM = config["tools"]["samtools"]["sort_memory"]
 SAMTOOLS_RMDUP = "-r" if config["tools"]["samtools"]["markdup_rmdup"] else ""
@@ -60,12 +63,9 @@ SAMTOOLS_RMDUP = "-r" if config["tools"]["samtools"]["markdup_rmdup"] else ""
 GATK_ERC = config["tools"]["gatk"]["emit_ref_confidence"]
 GATK_MBQ = config["tools"]["gatk"]["min_base_quality_score"]
 GATK_SMCT = config["tools"]["gatk"]["standard_min_confidence_threshold_for_calling"]
-GATK_GMC = config["tools"]["gatk"]["genotype_min_confidence"]
+GATK_GDB_PART = config["tools"]["gatk"].get("genomicsdb_num_partitions", 4)
+GATK_HC_SCATTER = config["tools"]["gatk"].get("hc_scatter", 8)
 
-SNP_FILTER = config["tools"]["bcftools"]["snp_filter"]
-INDEL_FILTER = config["tools"]["bcftools"]["indel_filter"]
-GENO_FILTER = config["tools"]["bcftools"]["genotype_filter"]
-EXCLUDE_BED = config["reference"].get("exclude_bed", "")
 BCFTOOLS_OT = config["tools"]["bcftools"]["output_type"]
 
 # Parabricks settings
@@ -99,6 +99,54 @@ def load_samples(sheet_path, fastq_dir):
 SAMPLES = load_samples(SAMPLES_SHEET, FASTQ_DIR)
 SAMPLE_NAMES = [s["sample"] for s in SAMPLES]
 
+def load_interval_chunks(fai_path, n_chunks):
+    """Split whole contigs from a .fai into ~n balanced comma-joined interval
+    strings (whole contigs only — required for GenomicsDBImport partitioning
+    and safe for HaplotypeCaller scatter/gather). Returns [""] (no intervals,
+    i.e. whole genome) when the .fai is missing or n_chunks <= 1."""
+    if n_chunks <= 1 or not os.path.exists(fai_path):
+        return [""]
+    contigs = []
+    with open(fai_path) as fh:
+        for line in fh:
+            parts = line.split("\t")
+            if len(parts) >= 2:
+                contigs.append((parts[0], int(parts[1])))
+    if not contigs:
+        return [""]
+    n_chunks = min(n_chunks, len(contigs))
+    target = sum(length for _, length in contigs) / n_chunks
+    chunks, current, current_len = [], [], 0
+    for name, length in contigs:
+        if current and current_len >= target and len(chunks) < n_chunks - 1:
+            chunks.append(",".join(current))
+            current, current_len = [], 0
+        current.append(name)
+        current_len += length
+    if current:
+        chunks.append(",".join(current))
+    return chunks
+
+# Mount the reference, FASTQ, trimmed and known-sites directories into the
+# Parabricks container at their host paths, so --ref/--in-fq/--known-vcf can
+# use absolute host paths regardless of where the inputs live. The project
+# directory itself is mounted at /workspace for outputs.
+_INPUT_DIRS = {REF_DIR, os.path.dirname(os.path.abspath(TRIMMED_DIR))}
+_INPUT_DIRS |= {os.path.dirname(os.path.abspath(s[d])) for s in SAMPLES for d in ("r1", "r2")}
+if KNOWN_VARIANTS:
+    _INPUT_DIRS.add(os.path.dirname(os.path.abspath(KNOWN_VARIANTS)))
+DOCKER_MOUNTS = " ".join(f'-v "{d}":"{d}":ro' for d in sorted(_INPUT_DIRS))
+
+# Select the filter set that matches the variant caller producing the VCF:
+# DeepVariant/GLnexus output has no GATK-only annotations, GATK output has them.
+CALLER = PARABRICKS_MODE if USE_PARABRICKS else "gatk"
+_BCFTOOLS = config["tools"]["bcftools"]
+_CALLER_BCFTOOLS = _BCFTOOLS.get(CALLER, {})
+SNP_FILTER = _CALLER_BCFTOOLS.get("snp_filter", _BCFTOOLS.get("snp_filter", "QUAL<30"))
+INDEL_FILTER = _CALLER_BCFTOOLS.get("indel_filter", _BCFTOOLS.get("indel_filter", "QUAL<30"))
+GENO_FILTER = _CALLER_BCFTOOLS.get("genotype_filter", _BCFTOOLS.get("genotype_filter", "FMT/DP<10 || FMT/GQ<20"))
+EXCLUDE_BED = config["reference"].get("exclude_bed", "")
+
 def get_sample_info(wildcards):
     for s in SAMPLES:
         if s["sample"] == wildcards.sample:
@@ -107,10 +155,18 @@ def get_sample_info(wildcards):
 
 if USE_PARABRICKS:
     print(f"Using Parabricks (GPU): {PARABRICKS_IMAGE} | mode: {PARABRICKS_MODE}")
+print(f"Active filters ({CALLER}): site [SNP] {SNP_FILTER} | [INDEL] {INDEL_FILTER} | geno {GENO_FILTER}")
 
 # ============================================================
 # TARGET RULE
 # ============================================================
+
+# Keep {sample} from swallowing the per-chunk infix (e.g. "test_1.hc_0"),
+# which would make haplotype_caller and gather_gvcfs ambiguous.
+wildcard_constraints:
+    sample="|".join(re.escape(s) for s in SAMPLE_NAMES),
+    chunk=r"\d+"
+
 rule all:
     input:
         f"{QC_DIR}/multiqc_report.html",
@@ -134,9 +190,15 @@ if USE_PARABRICKS:
     else:
         rule pbrun_fq2bam:
             input:
-                r1=lambda wildcards: get_sample_info(wildcards)["r1"],
-                r2=lambda wildcards: get_sample_info(wildcards)["r2"],
-                ref=REF_FASTA
+                r1=f"{TRIMMED_DIR}/{{sample}}_R1.trim.fastq.gz",
+                r2=f"{TRIMMED_DIR}/{{sample}}_R2.trim.fastq.gz",
+                ref=REF_ABS,
+                bwa_index=BWA_INDEX_FILES,
+                fai=REF_FAI,
+                dictf=REF_DICT
+            params:
+                fq1=lambda wildcards: os.path.abspath(f"{TRIMMED_DIR}/{wildcards.sample}_R1.trim.fastq.gz"),
+                fq2=lambda wildcards: os.path.abspath(f"{TRIMMED_DIR}/{wildcards.sample}_R2.trim.fastq.gz"),
             output:
                 bam=f"{ALIGNED_DIR}/{{sample}}.markdup.bam",
                 bai=f"{ALIGNED_DIR}/{{sample}}.markdup.bam.bai"
@@ -147,12 +209,12 @@ if USE_PARABRICKS:
                 mkdir -p {ALIGNED_DIR} {LOGS_DIR}/pbrun_fq2bam
                 docker run --rm --gpus all \
                     -v $(pwd):/workspace \
-                    -v /home/romar:/home/romar \
+                    {DOCKER_MOUNTS} \
                     -w /workspace \
                     {PARABRICKS_IMAGE} \
                     pbrun fq2bam \
-                        --ref /home/romar/ref/GCF_002204515.2_AaegL5.0_genomic.fna \
-                        --in-fq {input.r1} {input.r2} \
+                        --ref {REF_ABS} \
+                        --in-fq {params.fq1} {params.fq2} \
                         --out-bam /workspace/{output.bam} \
                         --read-group-sm {wildcards.sample} \
                         --read-group-id {wildcards.sample} \
@@ -160,30 +222,58 @@ if USE_PARABRICKS:
                         2> {log}
                 """
 
-    # BQSR - just copy since no known variants
-    rule pbrun_bqsr:
-        input:
-            bam=f"{ALIGNED_DIR}/{{sample}}.markdup.bam",
-            ref=REF_FASTA
-        output:
-            recal_table=temp(f"{ALIGNED_DIR}/{{sample}}.recal.table"),
-            bam=f"{ALIGNED_DIR}/{{sample}}.recal.bam",
-            bai=f"{ALIGNED_DIR}/{{sample}}.recal.bam.bai"
-        threads: THREADS
-        log: f"{LOGS_DIR}/pbrun_bqsr/{{sample}}.log"
-        shell:
-            """
-            mkdir -p {ALIGNED_DIR} {LOGS_DIR}/pbrun_bqsr
-            touch {output.recal_table}
-            cp {input.bam} {output.bam}
-            samtools index -@{threads} {output.bam}
-            """
+    # BQSR — only defined when a known-sites resource is configured;
+    # otherwise callers read the markdup BAM directly (no copy).
+    if USE_BQSR:
+        rule pbrun_bqsr:
+            input:
+                bam=f"{ALIGNED_DIR}/{{sample}}.markdup.bam",
+                ref=REF_ABS,
+                known=KNOWN_VARIANTS,
+                fai=REF_FAI,
+                dictf=REF_DICT
+            output:
+                recal_table=temp(f"{ALIGNED_DIR}/{{sample}}.recal.table"),
+                bam=f"{ALIGNED_DIR}/{{sample}}.recal.bam",
+                bai=f"{ALIGNED_DIR}/{{sample}}.recal.bam.bai"
+            threads: THREADS
+            log: f"{LOGS_DIR}/pbrun_bqsr/{{sample}}.log"
+            conda: "../config/environment.yaml"
+            shell:
+                """
+                mkdir -p {ALIGNED_DIR} {LOGS_DIR}/pbrun_bqsr
+                docker run --rm --gpus all \
+                    -v $(pwd):/workspace \
+                    {DOCKER_MOUNTS} \
+                    -w /workspace \
+                    {PARABRICKS_IMAGE} \
+                    pbrun bqsr \
+                        --ref {REF_ABS} \
+                        --in-bam /workspace/{input.bam} \
+                        --known-vcf {input.known} \
+                        --out-recal-file /workspace/{output.recal_table} \
+                        2> {log}
+                docker run --rm --gpus all \
+                    -v $(pwd):/workspace \
+                    {DOCKER_MOUNTS} \
+                    -w /workspace \
+                    {PARABRICKS_IMAGE} \
+                    pbrun applybqsr \
+                        --ref {REF_ABS} \
+                        --in-bam /workspace/{input.bam} \
+                        --recal-file /workspace/{output.recal_table} \
+                        --out-bam /workspace/{output.bam} \
+                        2>> {log}
+                samtools index -@{threads} -f {output.bam}
+                """
 
     if PARABRICKS_MODE == "deepvariant":
         rule pbrun_variant_call:
             input:
-                bam=f"{ALIGNED_DIR}/{{sample}}.recal.bam",
-                ref=REF_FASTA
+                bam=CALL_BAM,
+                ref=REF_ABS,
+                fai=REF_FAI,
+                dictf=REF_DICT
             output:
                 gvcf=f"{VARIANT_DIR}/{{sample}}.g.vcf.gz",
                 tbi=f"{VARIANT_DIR}/{{sample}}.g.vcf.gz.tbi"
@@ -195,11 +285,11 @@ if USE_PARABRICKS:
                 mkdir -p {VARIANT_DIR} {LOGS_DIR}/pbrun_deepvariant
                 docker run --rm --gpus all \
                     -v $(pwd):/workspace \
-                    -v /home/romar:/home/romar \
+                    {DOCKER_MOUNTS} \
                     -w /workspace \
                     {PARABRICKS_IMAGE} \
                     pbrun deepvariant \
-                        --ref /home/romar/ref/GCF_002204515.2_AaegL5.0_genomic.fna \
+                        --ref {REF_ABS} \
                         --in-bam /workspace/{input.bam} \
                         --out-variants /workspace/{output.gvcf} \
                         --gvcf \
@@ -209,66 +299,32 @@ if USE_PARABRICKS:
     else:
         rule pbrun_variant_call:
             input:
-                bam=f"{ALIGNED_DIR}/{{sample}}.recal.bam",
-                ref=REF_FASTA
+                bam=CALL_BAM,
+                ref=REF_ABS,
+                fai=REF_FAI,
+                dictf=REF_DICT
             output:
                 gvcf=f"{VARIANT_DIR}/{{sample}}.g.vcf.gz",
                 tbi=f"{VARIANT_DIR}/{{sample}}.g.vcf.gz.tbi"
             threads: THREADS
             log: f"{LOGS_DIR}/pbrun_haplotypecaller/{{sample}}.log"
+            conda: "../config/environment.yaml"
             shell:
                 """
                 mkdir -p {VARIANT_DIR} {LOGS_DIR}/pbrun_haplotypecaller
                 docker run --rm --gpus all \
                     -v $(pwd):/workspace \
-                    -v /home/romar:/home/romar \
+                    {DOCKER_MOUNTS} \
                     -w /workspace \
                     {PARABRICKS_IMAGE} \
                     pbrun haplotypecaller \
-                        --ref /home/romar/ref/GCF_002204515.2_AaegL5.0_genomic.fna \
+                        --ref {REF_ABS} \
                         --in-bam /workspace/{input.bam} \
                         --out-vcf /workspace/{output.gvcf} \
                         --gvcf \
                         2> {log}
+                bcftools index -t -f {output.gvcf}
                 """
-
-    rule pbrun_genotypegvfs:
-        input:
-            gvcfs=expand(f"{VARIANT_DIR}/{{sample}}.g.vcf.gz", sample=SAMPLE_NAMES),
-            ref=REF_FASTA
-        output:
-            vcf=f"{VARIANT_DIR}/cohort.raw.vcf.gz",
-            tbi=f"{VARIANT_DIR}/cohort.raw.vcf.gz.tbi"
-        threads: THREADS
-        log: f"{LOGS_DIR}/genotype_gvcfs.log"
-        conda: "../config/environment.yaml"
-        shell:
-            """
-            mkdir -p {VARIANT_DIR} {LOGS_DIR}
-            : > {log}
-            SAMPLE_VCFS=""
-            for g in {input.gvcfs}; do
-                v="${{g%.g.vcf.gz}}.vcf.gz"
-                docker run --rm --gpus all \
-                    -v $(pwd):/workspace \
-                    -v /home/romar:/home/romar \
-                    -w /workspace \
-                    {PARABRICKS_IMAGE} \
-                    pbrun genotypegvcf \
-                        --ref /home/romar/ref/GCF_002204515.2_AaegL5.0_genomic.fna \
-                        --in-gvcf /workspace/$g \
-                        --out-vcf /workspace/$v \
-                        2>> {log}
-                SAMPLE_VCFS="$SAMPLE_VCFS $v"
-            done
-            for v in $SAMPLE_VCFS; do
-                bcftools annotate -x FORMAT/VAF -Oz -o "${{v%.vcf.gz}}.novaf.vcf.gz" $v 2>> {log}
-                bcftools index -t "${{v%.vcf.gz}}.novaf.vcf.gz"
-            done
-            CLEAN_VCFS=$(for v in $SAMPLE_VCFS; do printf -- "%s " "${{v%.vcf.gz}}.novaf.vcf.gz"; done)
-            bcftools merge -Oz -o {output.vcf} $CLEAN_VCFS 2>> {log}
-            bcftools index -t {output.vcf}
-            """
 
 # ============================================================
 # GATK RULES (CPU) - fallback when Parabricks disabled
@@ -276,35 +332,12 @@ if USE_PARABRICKS:
 
 else:
 
-    rule fastp:
-        input:
-            r1=lambda wildcards: get_sample_info(wildcards)["r1"],
-            r2=lambda wildcards: get_sample_info(wildcards)["r2"]
-        output:
-            r1=temp(f"{TRIMMED_DIR}/{{sample}}_R1.trim.fastq.gz"),
-            r2=temp(f"{TRIMMED_DIR}/{{sample}}_R2.trim.fastq.gz"),
-            html=f"{QC_DIR}/fastp/{{sample}}_fastp.html",
-            json=f"{QC_DIR}/fastp/{{sample}}_fastp.json"
-        threads: THREADS
-        log: f"{LOGS_DIR}/fastp/{{sample}}.log"
-        conda: "../config/environment.yaml"
-        shell:
-            """
-            mkdir -p {QC_DIR}/fastp {TRIMMED_DIR} {LOGS_DIR}/fastp
-            fastp -i {input.r1} -I {input.r2} -o {output.r1} -O {output.r2} \
-                -h {output.html} -j {output.json} --thread {threads} \
-                --qualified_quality_phred {FASTP_Q} --length_required {FASTP_L} \
-                {FASTP_DETECT} \
-                --trim_front1 {FASTP_TF1} --trim_front2 {FASTP_TF2} \
-                --trim_tail1 {FASTP_TT1} --trim_tail2 {FASTP_TT2} \
-                2> {log}
-            """
-
     rule align_and_markdup:
         input:
             r1=f"{TRIMMED_DIR}/{{sample}}_R1.trim.fastq.gz",
             r2=f"{TRIMMED_DIR}/{{sample}}_R2.trim.fastq.gz",
-            ref=REF_FASTA
+            ref=REF_ABS,
+            bwa_index=BWA_INDEX_FILES
         output:
             bam=f"{ALIGNED_DIR}/{{sample}}.markdup.bam",
             bai=f"{ALIGNED_DIR}/{{sample}}.markdup.bam.bai"
@@ -314,9 +347,10 @@ else:
         shell:
             """
             mkdir -p {ALIGNED_DIR} {LOGS_DIR}/align
-            bwa mem -t {threads} -k {BWA_K} -w {BWA_W} -K {BWA_KK} \
+            bwa mem -t {threads} -k {BWA_K} -w {BWA_W} -c {BWA_C} \
                 -R '@RG\\tID:{wildcards.sample}\\tSM:{wildcards.sample}\\tPL:ILLUMINA' \
                 {input.ref} {input.r1} {input.r2} \
+                2> {log} \
                 | samtools sort -@{threads} -m {SAMTOOLS_MEM} -n - \
                 | samtools fixmate -m - - \
                 | samtools sort -@{threads} -m {SAMTOOLS_MEM} - \
@@ -324,51 +358,67 @@ else:
             samtools index -@{threads} {output.bam}
             """
 
-    rule bqsr:
-        input:
-            bam=f"{ALIGNED_DIR}/{{sample}}.markdup.bam",
-            ref=REF_FASTA
-        output:
-            recal_table=temp(f"{ALIGNED_DIR}/{{sample}}.recal.table"),
-            bam=f"{ALIGNED_DIR}/{{sample}}.recal.bam",
-            bai=f"{ALIGNED_DIR}/{{sample}}.recal.bam.bai"
-        threads: THREADS
-        log: f"{LOGS_DIR}/bqsr/{{sample}}.log"
-        conda: "../config/environment.yaml"
-        shell:
-            """
-            mkdir -p {ALIGNED_DIR} {LOGS_DIR}/bqsr
-            if [ -f "{config[reference][known_variants]}" ]; then
+    # BQSR — only defined when a known-sites resource is configured;
+    # otherwise HaplotypeCaller reads the markdup BAM directly (no copy).
+    if USE_BQSR:
+        rule bqsr:
+            input:
+                bam=f"{ALIGNED_DIR}/{{sample}}.markdup.bam",
+                ref=REF_ABS,
+                known=KNOWN_VARIANTS,
+                fai=REF_FAI,
+                dictf=REF_DICT
+            output:
+                recal_table=temp(f"{ALIGNED_DIR}/{{sample}}.recal.table"),
+                bam=f"{ALIGNED_DIR}/{{sample}}.recal.bam",
+                bai=f"{ALIGNED_DIR}/{{sample}}.recal.bam.bai"
+            threads: THREADS
+            log: f"{LOGS_DIR}/bqsr/{{sample}}.log"
+            conda: "../config/environment.yaml"
+            shell:
+                """
+                mkdir -p {ALIGNED_DIR} {LOGS_DIR}/bqsr
                 gatk --java-options "-Xmx{JAVA_MEM}" BaseRecalibrator \
                     -R {input.ref} -I {input.bam} \
-                    --known-sites {config[reference][known_variants]} \
+                    --known-sites {input.known} \
                     -O {output.recal_table} 2> {log}
                 gatk --java-options "-Xmx{JAVA_MEM}" ApplyBQSR \
                     -R {input.ref} -I {input.bam} \
                     --bqsr-recal-file {output.recal_table} \
                     -O {output.bam} 2>> {log}
-            else
-                touch {output.recal_table}
-                cp {input.bam} {output.bam}
                 samtools index -@{threads} {output.bam}
-            fi
-            """
+                """
+
+    # Scattered HaplotypeCaller: balanced whole-contig interval chunks
+    # (a single chunk with no intervals = whole genome when no .fai/n<=1).
+    HC_CHUNKS = load_interval_chunks(REF_FAI, GATK_HC_SCATTER)
+    HC_N_CHUNKS = len(HC_CHUNKS)
 
     rule haplotype_caller:
         input:
-            bam=f"{ALIGNED_DIR}/{{sample}}.recal.bam",
-            ref=REF_FASTA
+            bam=CALL_BAM,
+            ref=REF_ABS,
+            fai=REF_FAI,
+            dictf=REF_DICT
         output:
-            gvcf=f"{VARIANT_DIR}/{{sample}}.g.vcf.gz",
-            tbi=f"{VARIANT_DIR}/{{sample}}.g.vcf.gz.tbi"
+            gvcf=temp(f"{VARIANT_DIR}/{{sample}}.hc_{{chunk}}.g.vcf.gz"),
+            tbi=temp(f"{VARIANT_DIR}/{{sample}}.hc_{{chunk}}.g.vcf.gz.tbi")
+        params:
+            intervals=lambda wildcards: HC_CHUNKS[int(wildcards.chunk)]
         threads: THREADS
-        log: f"{LOGS_DIR}/haplotype_caller/{{sample}}.log"
+        log: f"{LOGS_DIR}/haplotype_caller/{{sample}}_{{chunk}}.log"
         conda: "../config/environment.yaml"
         shell:
             """
             mkdir -p {VARIANT_DIR} {LOGS_DIR}/haplotype_caller
+            if [ -n "{params.intervals}" ]; then
+                INTERVALS="--intervals {params.intervals}"
+            else
+                INTERVALS=""
+            fi
             gatk --java-options "-Xmx{JAVA_MEM}" HaplotypeCaller \
                 -R {input.ref} -I {input.bam} -O {output.gvcf} \
+                $INTERVALS \
                 --emit-ref-confidence {GATK_ERC} \
                 --min-base-quality-score {GATK_MBQ} \
                 --standard-min-confidence-threshold-for-calling {GATK_SMCT} \
@@ -377,10 +427,43 @@ else:
             gatk --java-options "-Xmx{JAVA_MEM}" IndexFeatureFile -I {output.gvcf} 2>> {log}
             """
 
+    rule gather_gvcfs:
+        input:
+            vcfs=lambda wildcards: expand(
+                f"{VARIANT_DIR}/{wildcards.sample}.hc_{{chunk}}.g.vcf.gz",
+                chunk=range(HC_N_CHUNKS)),
+            tbis=lambda wildcards: expand(
+                f"{VARIANT_DIR}/{wildcards.sample}.hc_{{chunk}}.g.vcf.gz.tbi",
+                chunk=range(HC_N_CHUNKS))
+        output:
+            gvcf=f"{VARIANT_DIR}/{{sample}}.g.vcf.gz",
+            tbi=f"{VARIANT_DIR}/{{sample}}.g.vcf.gz.tbi"
+        threads: 2
+        log: f"{LOGS_DIR}/gather_gvcfs/{{sample}}.log"
+        conda: "../config/environment.yaml"
+        shell:
+            """
+            mkdir -p {VARIANT_DIR} {LOGS_DIR}/gather_gvcfs
+            GVCF_ARGS=$(for f in {input.vcfs}; do printf -- "-I %s " $f; done)
+            gatk --java-options "-Xmx{JAVA_MEM}" GatherVcfs $GVCF_ARGS -O {output.gvcf} 2> {log}
+            gatk --java-options "-Xmx{JAVA_MEM}" IndexFeatureFile -I {output.gvcf} 2>> {log}
+            """
+
+# ============================================================
+# JOINT GENOTYPING
+# ============================================================
+# DeepVariant gVCFs carry no <NON_REF> allele, so GATK GenomicsDBImport /
+# GenotypeGVCFs cannot consume them — those are joint-genotyped with GLnexus
+# (DeepVariant preset). GATK-style gVCFs (CPU HaplotypeCaller or Parabricks
+# haplotypecaller mode) go through GenomicsDBImport + GenotypeGVCFs; GLnexus's
+# DeepVariant preset must NOT be used on them.
+
+if USE_PARABRICKS and PARABRICKS_MODE == "deepvariant":
+
     rule genotype_gvcfs:
         input:
             gvcfs=expand(f"{VARIANT_DIR}/{{sample}}.g.vcf.gz", sample=SAMPLE_NAMES),
-            ref=REF_FASTA
+            ref=REF_ABS
         output:
             vcf=f"{VARIANT_DIR}/cohort.raw.vcf.gz",
             tbi=f"{VARIANT_DIR}/cohort.raw.vcf.gz.tbi"
@@ -390,19 +473,80 @@ else:
         shell:
             """
             mkdir -p {VARIANT_DIR} {LOGS_DIR}
-            echo {input.gvcfs} | tr ' ' '\n' > {VARIANT_DIR}/gvcf.list
-            gatk --java-options "-Xmx{JAVA_MEM}" GenotypeGVCFs \
-                -R {input.ref} -V {VARIANT_DIR}/gvcf.list \
-                -O {output.vcf} \
-                --genotype-min-confidence {GATK_GMC} \
+            rm -rf {VARIANT_DIR}/.glnexus.db
+            glnexus_cli --config DeepVariant \
+                --dir {VARIANT_DIR}/.glnexus.db \
+                --mem-gbytes 8 --threads {threads} \
+                {input.gvcfs} \
+                2> {log} \
+                | bcftools view -Oz -o {output.vcf}
+            rm -rf {VARIANT_DIR}/.glnexus.db
+            bcftools index -t {output.vcf}
+            """
+
+else:
+
+    rule genotype_gvcfs:
+        input:
+            gvcfs=expand(f"{VARIANT_DIR}/{{sample}}.g.vcf.gz", sample=SAMPLE_NAMES),
+            ref=REF_ABS,
+            fai=REF_FAI,
+            dictf=REF_DICT
+        output:
+            vcf=f"{VARIANT_DIR}/cohort.raw.vcf.gz",
+            tbi=f"{VARIANT_DIR}/cohort.raw.vcf.gz.tbi"
+        threads: THREADS
+        log: f"{LOGS_DIR}/genotype_gvcfs.log"
+        conda: "../config/environment.yaml"
+        shell:
+            """
+            mkdir -p {VARIANT_DIR} {LOGS_DIR}
+            INTERVAL_ARGS=$(cut -f1 {input.fai} | sed 's/^/-L /' | tr '\n' ' ')
+            GVCF_ARGS=$(for f in {input.gvcfs}; do printf -- "-V %s " $f; done)
+            rm -rf {VARIANT_DIR}/genomicsdb
+            gatk --java-options "-Xmx{JAVA_MEM}" GenomicsDBImport \
+                $GVCF_ARGS \
+                $INTERVAL_ARGS \
+                --merge-contigs-into-num-partitions {GATK_GDB_PART} \
+                --reference {input.ref} \
+                --genomicsdb-workspace-path {VARIANT_DIR}/genomicsdb \
                 2> {log}
-            gatk --java-options "-Xmx{JAVA_MEM}" IndexFeatureFile -I {output.vcf} 2>> {log}
-            rm {VARIANT_DIR}/gvcf.list
+            gatk --java-options "-Xmx{JAVA_MEM}" GenotypeGVCFs \
+                -R {input.ref} \
+                -V gendb://{VARIANT_DIR}/genomicsdb \
+                -O {output.vcf} \
+                2>> {log}
+            rm -rf {VARIANT_DIR}/genomicsdb
             """
 
 # ============================================================
 # SHARED RULES (both modes)
 # ============================================================
+
+# Trimming runs in both modes (Parabricks fq2bam does not trim).
+rule fastp:
+    input:
+        r1=lambda wildcards: os.path.abspath(get_sample_info(wildcards)["r1"]),
+        r2=lambda wildcards: os.path.abspath(get_sample_info(wildcards)["r2"])
+    output:
+        r1=temp(f"{TRIMMED_DIR}/{{sample}}_R1.trim.fastq.gz"),
+        r2=temp(f"{TRIMMED_DIR}/{{sample}}_R2.trim.fastq.gz"),
+        html=f"{QC_DIR}/fastp/{{sample}}_fastp.html",
+        json=f"{QC_DIR}/fastp/{{sample}}_fastp.json"
+    threads: THREADS
+    log: f"{LOGS_DIR}/fastp/{{sample}}.log"
+    conda: "../config/environment.yaml"
+    shell:
+        """
+        mkdir -p {QC_DIR}/fastp {TRIMMED_DIR} {LOGS_DIR}/fastp
+        fastp -i {input.r1} -I {input.r2} -o {output.r1} -O {output.r2} \
+            -h {output.html} -j {output.json} --thread {threads} \
+            --qualified_quality_phred {FASTP_Q} --length_required {FASTP_L} \
+            {FASTP_DETECT} \
+            --trim_front1 {FASTP_TF1} --trim_front2 {FASTP_TF2} \
+            --trim_tail1 {FASTP_TT1} --trim_tail2 {FASTP_TT2} \
+            2> {log}
+        """
 
 rule flagstat:
     input: bam=f"{ALIGNED_DIR}/{{sample}}.markdup.bam"
@@ -428,20 +572,6 @@ rule coverage:
         samtools coverage {input.bam} > {output} 2> {log}
         """
 
-# fastp outputs for MultiQC (skip if Parabricks did trimming)
-if USE_PARABRICKS:
-    rule fastp_stub:
-        input: bam=f"{ALIGNED_DIR}/{{sample}}.markdup.bam"
-        output:
-            html=f"{QC_DIR}/fastp/{{sample}}_fastp.html",
-            json=f"{QC_DIR}/fastp/{{sample}}_fastp.json"
-        shell:
-            """
-            mkdir -p {QC_DIR}/fastp
-            echo '{{"sample_id": "{wildcards.sample}", "tool": "parabricks_fq2bam"}}' > {output.json}
-            echo "<html><body><h1>Parabricks fq2bam - {wildcards.sample}</h1></body></html>" > {output.html}
-            """
-
 rule filter_variants:
     input:
         vcf=f"{VARIANT_DIR}/cohort.raw.vcf.gz",
@@ -461,10 +591,12 @@ rule filter_variants:
         fi
         bcftools view -m2 -M2 -v snps $EXCLUDE -Ou {input.vcf} 2> {log} \
             | bcftools filter -e '{SNP_FILTER}' -s SNP_HARDFAIL -Ou 2>> {log} \
-            | bcftools filter -e '{GENO_FILTER}' --set-gts . -Oz -o {VARIANT_DIR}/.snps.tmp.vcf.gz 2>> {log}
+            | bcftools filter -e '{GENO_FILTER}' -S . -Oz -o {VARIANT_DIR}/.snps.tmp.vcf.gz 2>> {log}
+        bcftools index -t {VARIANT_DIR}/.snps.tmp.vcf.gz
         bcftools view -m2 -M2 -v indels $EXCLUDE -Ou {input.vcf} 2>> {log} \
             | bcftools filter -e '{INDEL_FILTER}' -s INDEL_HARDFAIL -Ou 2>> {log} \
-            | bcftools filter -e '{GENO_FILTER}' --set-gts . -Oz -o {VARIANT_DIR}/.indels.tmp.vcf.gz 2>> {log}
+            | bcftools filter -e '{GENO_FILTER}' -S . -Oz -o {VARIANT_DIR}/.indels.tmp.vcf.gz 2>> {log}
+        bcftools index -t {VARIANT_DIR}/.indels.tmp.vcf.gz
         bcftools concat -a -Oz -o {output.vcf} \
             {VARIANT_DIR}/.snps.tmp.vcf.gz {VARIANT_DIR}/.indels.tmp.vcf.gz 2>> {log}
         bcftools index -t -f {output.vcf}
@@ -496,7 +628,7 @@ rule variant_stats:
     shell:
         """
         mkdir -p {VARIANT_DIR} {LOGS_DIR}/variant_stats
-        bcftools stats {input.vcf} > {output} 2> {log}
+        bcftools stats -f PASS,. {input.vcf} > {output} 2> {log}
         """
 
 rule variant_summary:

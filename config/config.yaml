@@ -5,8 +5,10 @@
 reference:
   # Path to Aedes aegypti reference genome FASTA (e.g., AaegL5.0)
   fasta: "ref/AaegL5.0.fasta"
-  # Optional: BWA index prefix (if different from fasta basename)
-  index_prefix: "ref/AaegL5.0"
+  # BWA index prefix: the exact path as passed to `bwa index`
+  # (bwa writes <prefix>.amb/.ann/.bwt/.pac/.sa). Usually the FASTA path
+  # itself, e.g. `bwa index ref/AaegL5.0.fasta` -> prefix "ref/AaegL5.0.fasta".
+  index_prefix: "ref/AaegL5.0.fasta"
   # Optional: known variants VCF for BQSR (if available)
   known_variants: ""
   # Optional: BED of regions to EXCLUDE from variant filtering
@@ -50,7 +52,10 @@ tools:
     algorithm: "mem"
     min_seed_len: 19
     bandwidth: 100
-    max_occurrences: 10000
+    # Passed to bwa mem as -c: skip seeds with more than N occurrences
+    # (bwa's own default is 500). This is NOT bwa's -K option (batch size in
+    # bases, only used for cross-thread reproducibility) — we don't set -K.
+    max_occurrences: 500
   
   samtools:
     sort_memory: "500M"
@@ -61,16 +66,37 @@ tools:
     emit_ref_confidence: "GVCF"
     min_base_quality_score: 20
     standard_min_confidence_threshold_for_calling: 30.0
-    # GenotypeGVCFs settings
-    genotype_min_confidence: 30.0
+    # HaplotypeCaller scatter (CPU mode): balanced whole-contig interval
+    # chunks run in parallel and are gathered back into one gVCF per sample.
+    # 1 disables scattering (whole-genome run).
+    hc_scatter: 8
+    # GenomicsDBImport: merge the whole-contig -L intervals into ~N GenomicsDB
+    # arrays. AaegL5 has ~1,900 scaffolds; without merging, import is slow.
+    # 0 disables merging.
+    genomicsdb_num_partitions: 4
   
   bcftools:
-    # Site-level hard filters, applied separately to SNPs and indels
-    # (GATK best practice: different thresholds per variant type)
-    snp_filter: "QUAL<30 || MQ<40 || QD<2.0 || FS>60.0 || SOR>3.0 || ReadPosRankSum<-8.0"
-    indel_filter: "QUAL<30 || QD<2.0 || FS>200.0 || ReadPosRankSum<-20.0"
-    # Genotype-level mask: genotypes failing this are set to ./. (sites kept)
-    genotype_filter: "FMT/DP<10 || FMT/GQ<20"
+    # Site-level hard filters, applied separately to SNPs and indels.
+    # The active set is selected by variant caller:
+    #   Parabricks mode "deepvariant"      -> tools.bcftools.deepvariant
+    #   Parabricks mode "haplotypecaller"  -> tools.bcftools.gatk
+    #   CPU mode (GATK)                    -> tools.bcftools.gatk
+    # deepvariant: GLnexus output carries only QUAL + FORMAT fields
+    # (GT/DP/AD/GQ/PL) — GATK-only tags (QD/MQ/FS/SOR/ReadPosRankSum) are
+    # missing and evaluate false in bcftools expressions, silently doing
+    # nothing, so GPU-mode filters must use only QUAL/DP/GQ/VAF.
+    deepvariant:
+      snp_filter: "QUAL<30"
+      indel_filter: "QUAL<30"
+      # Genotype-level mask (failing genotypes set to ./. ; sites kept):
+      # low depth, low genotype quality, or alt allele balance (VAF) < 0.2
+      genotype_filter: "FMT/DP<10 || FMT/GQ<20 || (FMT/AD[0:1]/(FMT/AD[0:0]+FMT/AD[0:1]))<0.2"
+    # gatk: GATK annotations are present in CPU/GenotypeGVCFs output,
+    # so the classic GATK hard-filter expressions work here.
+    gatk:
+      snp_filter: "QUAL<30 || MQ<40 || QD<2.0 || FS>60.0 || SOR>3.0 || ReadPosRankSum<-8.0"
+      indel_filter: "QUAL<30 || QD<2.0 || FS>200.0 || ReadPosRankSum<-20.0"
+      genotype_filter: "FMT/DP<10 || FMT/GQ<20"
     # View settings
     output_type: "z"
 

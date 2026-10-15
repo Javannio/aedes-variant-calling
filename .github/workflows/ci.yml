@@ -5,16 +5,40 @@ on:
   pull_request:
 
 jobs:
-  dry-run:
+  e2e-test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+
+      - uses: mamba-org/setup-micromamba@v2
         with:
-          python-version: "3.11"
-      - name: Install Snakemake
-        run: pip install "snakemake>=8" pyyaml pandas
-      - name: Validate workflow (dry run)
+          environment-file: config/environment.yaml
+          cache-environment: true
+
+      - name: Index test reference
+        shell: bash -el {0}
+        run: |
+          bwa index test/ref/tiny.fa
+          samtools faidx test/ref/tiny.fa
+          gatk CreateSequenceDictionary -R test/ref/tiny.fa
+
+      - name: Run pipeline end-to-end (CPU mode, paired-end)
+        shell: bash -el {0}
         run: |
           cp config/config.ci.yaml config/config.local.yaml
-          snakemake -n --cores 1
+          snakemake --cores 2
+
+      - name: Verify planted variant was called
+        shell: bash -el {0}
+        run: |
+          bcftools view -H variants/cohort.raw.vcf.gz | grep -q "C	G" \
+            && echo "Planted SNP found" \
+            || { echo "Planted SNP missing"; exit 1; }
+
+      - name: Upload MultiQC report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: multiqc-report
+          path: qc/multiqc_report.html
+          if-no-files-found: ignore
