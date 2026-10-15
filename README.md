@@ -341,9 +341,17 @@ and was rebuilt for mosquito genomics:
 ## Validation Results
 
 A full 2-sample run on the real AaegL5.0 reference (GPU/Parabricks + GLnexus)
-passes sanity checks: **Ti/Tv 1.76** and **het/hom 0.59** on the PASS set
-(329,239 sites). See [`docs/validation.md`](docs/validation.md) for all
-metrics and the commands to reproduce them; the earlier pre-GLnexus run is in
+demonstrates the pipeline end-to-end on real public data: FASTQs → GLnexus →
+filtering → stats, with **Ti/Tv 1.76** on the PASS set (329,239 sites) and a
+targeted **kdr positive control** (V410L and V1016I recovered with read-level
+allele frequencies of 93% and 100% in the knockdown-resistant pool vs 13% and
+17% in the dead pool; F1534C correctly absent under 50–70× capture depth).
+
+The test data are pooled, low-coverage exome-capture libraries, so
+het/hom-style genotype metrics are pipeline diagnostics, not
+population-genetic results — see the caveats in
+[`docs/validation.md`](docs/validation.md), which also has all metrics and
+the commands to reproduce them; the earlier pre-GLnexus run is in
 [`docs/run_results.md`](docs/run_results.md).
 
 ## Troubleshooting

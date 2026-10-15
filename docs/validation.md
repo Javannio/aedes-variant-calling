@@ -1,5 +1,12 @@
 # Validation — 2-sample real-data run (2026-10-15)
 
+This document is an **end-to-end pipeline test on real public data**: raw
+FASTQs → fastp → Parabricks DeepVariant → GLnexus → per-caller filtering →
+stats/MultiQC, plus a targeted positive control at the kdr loci. The pooled,
+low-coverage, exome-capture data was chosen because it is openly available and
+stress-tests the pipeline; the variant counts and genotype-based metrics below
+are **pipeline diagnostics, not population-genetic results**.
+
 ## Run context
 
 | Item | Value |
@@ -114,12 +121,42 @@ PASS set: 306,250 SNPs, 22,989 indels, 0 multiallelic sites.
 | Metric | Value | Interpretation |
 |--------|-------|----------------|
 | Ti/Tv | **1.76** (195,165 Ti / 111,084 Tv) | Healthy for insect data (typical range ~1.5–2.0); low Ti/Tv would indicate residual false positives. Exome-capture coding targets sit near the upper end, off-target reads near the lower end |
-| het/hom ratio | **0.59** (het 185,362, hom-alt 128,471) | Moderate heterozygosity, consistent with segregating variation in a wild population |
+| het/hom ratio | **0.59** (het 185,362, hom-alt 128,471) | Diagnostic only: these are pools of 25, so diploid `het`/`hom` labels are the caller's model output, not individual genotypes. A pool "het" call reflects an intermediate read-level allele fraction across pool members, not Mendelian heterozygosity |
 | Called variants per sample | SRR14609304: 178,805 · SRR14609308: 174,795 | Sites with a non-reference genotype for that sample (of the 329,239 PASS sites) |
 
 For reference, the unfiltered all-site Ti/Tv is 1.59 (including hard-filter
 failures) and the unfiltered het ratio is 0.62 — hard filtering removes
 low-quality calls but does not distort the site spectrum.
+
+## kdr positive control — V410L, V1016I, F1534C
+
+Target-site check on the sodium-channel gene *para* (LOC5567355,
+`NC_035109.1:315,926,360-316,405,639`, minus strand). Codon coordinates were
+derived from the MSc primer pairs in `kdr_primers.csv` (in-silico PCR against
+the reference: 0 mismatches, exact product sizes) intersected with the RefSeq
+isoform XM_021852340.1 CDS frame; translation was verified base-for-base
+against the NCBI protein XP_021708032.1. Note the numbering offset: the
+literature sites correspond to RefSeq X1 residues 408 and 1012 (different
+isoform N-termini/indels).
+
+Because these are pools of 25, results are reported as **read-level AD allele
+frequencies**, not diploid genotypes:
+
+| Site | Position (NC_035109.1) | REF>ALT | Codon (transcript) | AA change | Dead pool AD → AF | kdr pool AD → AF | FILTER |
+|------|------------------------|---------|--------------------|-----------|-------------------|------------------|--------|
+| V410L | 316080722 | C>A | GTA>TTA | Val→Leu | 85,13 → **13.3%** | 4,56 → **93.3%** | PASS |
+| V1016I | 315983763 | C>T | GTA>ATA | Val→Ile | 45,9 → **16.7%** | 0,25 → **100%** | PASS |
+| F1534C | — | — | — | — | not present | not present | — |
+
+- Both resistance alleles are strongly enriched in the knockdown-resistant
+  pool versus the dead pool — the biological positive control passes.
+- Site depth (AD totals) is 98×/60× (V410) and 54×/25× (V1016); all three
+  amplicons sit inside capture targets at 50–70×/base, so these are genuine
+  calls, not coverage artifacts.
+- **F1534C is genuinely absent**: all 11 phenylalanine codons inside the
+  F1534C amplicon are deeply covered, and both gVCFs are pure reference
+  blocks across the amplicon — the pipeline confidently calls reference
+  there, the allele simply is not in these two pools.
 
 ## MultiQC
 
@@ -150,10 +187,20 @@ for S in SRR14609304 SRR14609308; do
   bcftools view -s "$S" -Ou variants/cohort.filtered.vcf.gz \
     | bcftools view -H -i 'GT="alt"' | wc -l
 done
+
+# kdr positive control: read-level AD allele frequencies at the two sites
+bcftools query -f '%CHROM\t%POS\t%REF\t%ALT\t%FILTER[\t%AD]\n' \
+  -r NC_035109.1:316080722,NC_035109.1:315983763 variants/cohort.filtered.vcf.gz
 ```
 
 ## Caveats
 
+- These are **pools of 25 mosquitoes** run through a diploid germline caller:
+  `FMT/DP`, `GQ` and `VAF` genotype-level filters, het/hom ratios and
+  `GT` labels are model outputs, not population-genetic quantities. The
+  interpretable per-sample quantity is the **read-level AD allele frequency**
+  (as used for the kdr sites above). Ti/Tv and site-level QUAL/FILTER metrics
+  are ploidy-independent and remain meaningful.
 - Per-sample `*.filtered.vcf.gz` files keep the **full PASS site set** of the
   cohort; the genotype column belongs to that sample only. Sample-specific
   record counts therefore come from `GT="alt"` subsetting (above), not from
