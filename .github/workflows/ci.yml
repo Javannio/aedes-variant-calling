@@ -6,11 +6,12 @@ on:
 
 jobs:
   e2e-test:
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest moves to 26.04 on 2026-10-19
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: mamba-org/setup-micromamba@v2
+      - uses: mamba-org/setup-micromamba@v3
         with:
           environment-file: config/environment.yaml
           cache-environment: true
@@ -37,7 +38,7 @@ jobs:
 
       - name: Upload MultiQC report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: multiqc-report
           path: qc/multiqc_report.html
