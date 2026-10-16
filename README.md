@@ -350,6 +350,16 @@ against an identical paralogous copy on scaffold NW_018735214.1, so caller
 output is reference-only while read counts including ambiguous reads show
 100%/87% across both copies).
 
+kdr codons are conventionally numbered after the *Musca domestica*
+sodium-channel sequence; RefSeq isoform X1 is a different-length isoform, so
+its residue indices shift non-uniformly:
+
+| Literature codon | RefSeq X1 residue | Offset | Position (NC_035109.1) |
+|------------------|-------------------|--------|------------------------|
+| V410L | 408 | −2 | 316080722 |
+| V1016I | 1012 | −4 | 315983763 |
+| F1534C | 1554 | +20 | 315939224 |
+
 The test data are pooled, low-coverage exome-capture libraries, so
 het/hom-style genotype metrics are pipeline diagnostics, not
 population-genetic results — see the caveats in

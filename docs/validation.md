@@ -135,9 +135,17 @@ Target-site check on the sodium-channel gene *para* (LOC5567355,
 derived from the MSc primer pairs in `kdr_primers.csv` (in-silico PCR against
 the reference: 0 mismatches, exact product sizes) intersected with the RefSeq
 isoform XM_021852340.1 CDS frame; translation was verified base-for-base
-against the NCBI protein XP_021708032.1. Note the numbering offset: the
-literature sites correspond to RefSeq X1 residues 408, 1012 and 1554
-(different isoform N-termini/indels).
+against the NCBI protein XP_021708032.1.
+
+Literature codons follow the *Musca domestica* sodium-channel numbering used
+in the kdr papers; RefSeq isoform X1 is a different-length isoform, so the
+residue indices shift by non-uniform offsets (−2, −4, +20):
+
+| Literature codon | RefSeq X1 residue (XM_021852340.1) | Offset | Genomic position (NC_035109.1) |
+|------------------|------------------------------------|--------|--------------------------------|
+| V410L | 408 | −2 | 316080722 |
+| V1016I | 1012 | −4 | 315983763 |
+| F1534C | 1554 | +20 | 315939224 |
 
 Because these are pools of 25, results are reported as read-level allele
 counts — VCF `AD` for the two called sites, read-pileup counts for F1534C
