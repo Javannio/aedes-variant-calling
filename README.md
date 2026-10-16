@@ -345,7 +345,7 @@ demonstrates the pipeline end-to-end on real public data: FASTQs → GLnexus →
 filtering → stats, with **Ti/Tv 1.76** on the PASS set (329,239 sites) and a
 targeted **kdr positive control** (V410L and V1016I recovered with read-level
 allele frequencies of 93% and 100% in the knockdown-resistant pool vs 13% and
-17% in the dead pool; F1534C correctly absent under 50–70× capture depth).
+17% in the dead pool; F1534C not detected despite 64×/40× mean amplicon depth).
 
 The test data are pooled, low-coverage exome-capture libraries, so
 het/hom-style genotype metrics are pipeline diagnostics, not

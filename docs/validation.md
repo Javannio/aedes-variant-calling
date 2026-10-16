@@ -146,17 +146,20 @@ frequencies**, not diploid genotypes:
 |------|------------------------|---------|--------------------|-----------|-------------------|------------------|--------|
 | V410L | 316080722 | C>A | GTA>TTA | Val→Leu | 85,13 → **13.3%** | 4,56 → **93.3%** | PASS |
 | V1016I | 315983763 | C>T | GTA>ATA | Val→Ile | 45,9 → **16.7%** | 0,25 → **100%** | PASS |
-| F1534C | — | — | — | — | not present | not present | — |
+| F1534C | **covered — allele absent** (not a capture gap) | no ALT (REF only) | all 11 Phe codons REF | Phe retained, no Cys call | REF blocks, 51–68× | REF blocks, 38–44× | n/a (no record) |
 
 - Both resistance alleles are strongly enriched in the knockdown-resistant
   pool versus the dead pool — the biological positive control passes.
-- Site depth (AD totals) is 98×/60× (V410) and 54×/25× (V1016); all three
-  amplicons sit inside capture targets at 50–70×/base, so these are genuine
-  calls, not coverage artifacts.
-- **F1534C is genuinely absent**: all 11 phenylalanine codons inside the
-  F1534C amplicon are deeply covered, and both gVCFs are pure reference
-  blocks across the amplicon — the pipeline confidently calls reference
-  there, the allele simply is not in these two pools.
+- Site depth (AD totals) is 98×/60× (V410) and 54×/25× (V1016); mean
+  amplicon depths are 77×/43× (V410), 45×/18× (V1016) for the dead/kdr
+  pools — far above the ~1.5× genome-wide average, i.e. inside the capture
+  targets, so these are genuine calls, not coverage artifacts.
+- **F1534C: covered, allele absent — not a capture gap.** The F1534C
+  amplicon has mean depths of 64× (dead pool) and 40× (kdr pool), with every
+  one of the 11 candidate phenylalanine codons at 51–68× (dead) / 38–44×
+  (kdr) per base, and both gVCFs are pure reference blocks across the
+  amplicon. The pipeline confidently calls reference there — the Cys allele
+  is not present at detectable frequency in these two Colinas pools.
 
 ## MultiQC
 
