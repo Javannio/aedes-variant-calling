@@ -136,17 +136,18 @@ derived from the MSc primer pairs in `kdr_primers.csv` (in-silico PCR against
 the reference: 0 mismatches, exact product sizes) intersected with the RefSeq
 isoform XM_021852340.1 CDS frame; translation was verified base-for-base
 against the NCBI protein XP_021708032.1. Note the numbering offset: the
-literature sites correspond to RefSeq X1 residues 408 and 1012 (different
-isoform N-termini/indels).
+literature sites correspond to RefSeq X1 residues 408, 1012 and 1554
+(different isoform N-termini/indels).
 
-Because these are pools of 25, results are reported as **read-level AD allele
-frequencies**, not diploid genotypes:
+Because these are pools of 25, results are reported as read-level allele
+counts — VCF `AD` for the two called sites, read-pileup counts for F1534C
+(which the caller cannot see, below) — not diploid genotypes:
 
-| Site | Position (NC_035109.1) | REF>ALT | Codon (transcript) | AA change | Dead pool AD → AF | kdr pool AD → AF | FILTER |
-|------|------------------------|---------|--------------------|-----------|-------------------|------------------|--------|
+| Site | Position (NC_035109.1) | REF>ALT | Codon (transcript) | AA change | Dead pool AD or pileup → AF | kdr pool AD or pileup → AF | FILTER |
+|------|------------------------|---------|--------------------|-----------|----------------------------|---------------------------|--------|
 | V410L | 316080722 | C>A | GTA>TTA | Val→Leu | 85,13 → **13.3%** | 4,56 → **93.3%** | PASS |
 | V1016I | 315983763 | C>T | GTA>ATA | Val→Ile | 45,9 → **16.7%** | 0,25 → **100%** | PASS |
-| F1534C | **covered — allele absent** (not a capture gap) | no ALT (REF only) | all 11 Phe codons REF | Phe retained, no Cys call | REF blocks, 51–68× | REF blocks, 38–44× | n/a (no record) |
+| F1534C | 315939224 — **not callable** | A>C in reads | TTC>TGC | Phe→Cys | pileup 46/53 → **86.8%** | pileup 42/42 → **100%** | no record — 0 reads pass MAPQ |
 
 - Both resistance alleles are strongly enriched in the knockdown-resistant
   pool versus the dead pool — the biological positive control passes.
@@ -154,12 +155,18 @@ frequencies**, not diploid genotypes:
   amplicon depths are 77×/43× (V410), 45×/18× (V1016) for the dead/kdr
   pools — far above the ~1.5× genome-wide average, i.e. inside the capture
   targets, so these are genuine calls, not coverage artifacts.
-- **F1534C: covered, allele absent — not a capture gap.** The F1534C
-  amplicon has mean depths of 64× (dead pool) and 40× (kdr pool), with every
-  one of the 11 candidate phenylalanine codons at 51–68× (dead) / 38–44×
-  (kdr) per base, and both gVCFs are pure reference blocks across the
-  amplicon. The pipeline confidently calls reference there — the Cys allele
-  is not present at detectable frequency in these two Colinas pools.
+- **F1534C: not callable from these alignments — the caller never saw the
+  reads.** Raw depth at `315939224` is 55/42 (dead/kdr), but **every read at
+  the site has MAPQ 0**: a 200 bp window around the site is 100% identical
+  (0 mismatches) to unplaced scaffold `NW_018735214.1:6901-7100` on the
+  reverse strand (gene LOC110680707, *para*-like), so no read can be assigned
+  to one locus. `samtools view -c -q 1` returns **0** for both pools — no
+  caller-visible read exists at MAPQ ≥ 1, which is why both gVCFs contain
+  reference-only blocks across the amplicon. Read-level counts that **include**
+  the ambiguous reads (`samtools mpileup -x -B -Q 13`, duplicates excluded)
+  recover the Cys allele at **100% (42/42) in the kdr pool and 86.8% (46/53)
+  in the dead pool** — but these counts pool both gene copies and are not
+  locus-specific, so they cannot be read as a per-pool frequency at F1534.
 
 ## MultiQC
 
@@ -191,9 +198,20 @@ for S in SRR14609304 SRR14609308; do
     | bcftools view -H -i 'GT="alt"' | wc -l
 done
 
-# kdr positive control: read-level AD allele frequencies at the two sites
+# kdr positive control: read-level AD allele frequencies at the two called sites
 bcftools query -f '%CHROM\t%POS\t%REF\t%ALT\t%FILTER[\t%AD]\n' \
   -r NC_035109.1:316080722,NC_035109.1:315983763 variants/cohort.filtered.vcf.gz
+
+# F1534C: all reads at the site are MAPQ 0 (ambiguous), so no caller can use them
+for S in SRR14609304 SRR14609308; do
+  samtools view -c -F 0x400 aligned/$S.markdup.bam NC_035109.1:315939224-315939224  # all reads
+  samtools view -c -F 0x400 -q 1 aligned/$S.markdup.bam NC_035109.1:315939224-315939224  # caller-visible: 0
+done
+# read-level allele counts including ambiguous reads (reproduce Table values)
+for S in SRR14609304 SRR14609308; do
+  samtools mpileup -x -B -Q 13 -f <reference.fa> \
+    -r NC_035109.1:315939224-315939224 aligned/$S.markdup.bam
+done
 ```
 
 ## Caveats
@@ -201,8 +219,9 @@ bcftools query -f '%CHROM\t%POS\t%REF\t%ALT\t%FILTER[\t%AD]\n' \
 - These are **pools of 25 mosquitoes** run through a diploid germline caller:
   `FMT/DP`, `GQ` and `VAF` genotype-level filters, het/hom ratios and
   `GT` labels are model outputs, not population-genetic quantities. The
-  interpretable per-sample quantity is the **read-level AD allele frequency**
-  (as used for the kdr sites above). Ti/Tv and site-level QUAL/FILTER metrics
+  interpretable per-sample quantity is the **read-level allele frequency**
+  (VCF `AD` for called sites; read pileup for F1534C, reported with and
+  without ambiguous MAPQ-0 reads). Ti/Tv and site-level QUAL/FILTER metrics
   are ploidy-independent and remain meaningful.
 - Per-sample `*.filtered.vcf.gz` files keep the **full PASS site set** of the
   cohort; the genotype column belongs to that sample only. Sample-specific

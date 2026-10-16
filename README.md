@@ -343,9 +343,12 @@ and was rebuilt for mosquito genomics:
 A full 2-sample run on the real AaegL5.0 reference (GPU/Parabricks + GLnexus)
 demonstrates the pipeline end-to-end on real public data: FASTQs → GLnexus →
 filtering → stats, with **Ti/Tv 1.76** on the PASS set (329,239 sites) and a
-targeted **kdr positive control** (V410L and V1016I recovered with read-level
+targeted **kdr positive control** (V410L and V1016I detected with read-level
 allele frequencies of 93% and 100% in the knockdown-resistant pool vs 13% and
-17% in the dead pool; F1534C not detected despite 64×/40× mean amplicon depth).
+17% in the dead pool; F1534C **not callable** — every read there is MAPQ 0
+against an identical paralogous copy on scaffold NW_018735214.1, so caller
+output is reference-only while read counts including ambiguous reads show
+100%/87% across both copies).
 
 The test data are pooled, low-coverage exome-capture libraries, so
 het/hom-style genotype metrics are pipeline diagnostics, not
