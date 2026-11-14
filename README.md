@@ -10,7 +10,7 @@ A portable, reproducible Snakemake workflow for germline variant calling in *Aed
 - **GPU-accelerated**: Optional [NVIDIA Parabricks](https://docs.nvidia.com/clara/parabricks) DeepVariant calling with GLnexus joint genotyping; GATK4 CPU fallback included
 - **Reproducible**: Conda environments pin exact tool versions
 - **Flexible**: Accepts FASTQ files directly or downloads from SRA
-- **Standard QC**: fastp trimming (both modes), read-group-tagged alignment, duplicate marking, MultiQC
+- **Standard QC**: fastp trimming (both modes), read-group-tagged alignment, duplicate marking, MultiQC; per-sample QC gates block low-quality samples before variant calling
 - **Best-practice hard filtering**: SNP/indel split with type-specific thresholds; per-genotype DP/GQ masking; optional repeat-exclusion BED
 - **Comprehensive reporting**: Per-sample and cohort-level QC, variant statistics, MultiQC dashboard
 
@@ -27,6 +27,9 @@ alignment ──► Markdup BAM                (BWA-MEM + samtools markdup, or p
     │             │                       @RG read groups set in both modes)
     │             ▼
     │      samtools flagstat + coverage
+    │             ▼
+    │      QC gates ──► qc/gates/*.gate.tsv   (mapping/duplicates/depth/breadth vs
+    │                    config qc: thresholds; FAIL blocks that sample's calling)
     ▼
 BQSR (optional) ──► Recalibrated BAM     (skipped unless known-sites VCF provided)
     │
@@ -196,7 +199,27 @@ structure mistakes fail at startup instead of mid-run:
 | `output` | Output directory structure |
 | `tools` | Tool-specific parameters (threads, filters, Parabricks settings) |
 | `execution` | Conda usage, dry-run, intermediate file retention |
-| `qc` | Quality thresholds for reporting |
+| `qc` | Per-sample QC gate thresholds (enforced before variant calling) |
+
+### QC gates
+
+After alignment, every sample is checked against the `qc:` thresholds
+before it is allowed into variant calling (`qc/gates/<sample>.gate.tsv`;
+aggregated in `qc/gates/summary.tsv`):
+
+| Gate | Metric | Source | Condition |
+|------|--------|--------|-----------|
+| `min_mapping_rate` | mapped / total reads | flagstat | `>=` (default 0.80) |
+| `max_duplicate_rate` | duplicates / total reads | flagstat | `<=` (default 0.50) |
+| `min_coverage_depth` | genome-wide mean depth | samtools coverage | `>=` (default 10) |
+| `min_genome_fraction_covered` | covered bases / reference length | samtools coverage | `>=` (default 0.80) |
+
+A failing gate stops the pipeline with the offending metric and threshold
+printed (the report TSV is kept only when all gates pass; the full report is
+in the rule's log). Fractions are 0–1 and depth/breadth are **genome-wide**
+— for exome-capture or targeted data, lower `min_coverage_depth` and
+`min_genome_fraction_covered` accordingly. `qc.enabled: false` turns gates
+into report-only checks (written as `SKIP`, never fail the run).
 
 CPU-mode performance knobs (both under `tools.gatk`): `hc_scatter` controls
 how many balanced whole-contig HaplotypeCaller chunks run in parallel (1 =
@@ -282,6 +305,7 @@ element-rich regions.
 │   ├── fastp/                 # fastp HTML/JSON reports (both modes)
 │   ├── flagstat/              # samtools flagstat
 │   ├── coverage/              # samtools coverage
+│   ├── gates/                 # QC gate PASS/FAIL reports + summary.tsv
 │   ├── multiqc_report.html    # Aggregated MultiQC report
 │   └── alignment_summary.tsv  # Alignment metrics table
 ├── trimmed/                   # Trimmed FASTQ (temp, cleaned by default)
@@ -331,8 +355,12 @@ snakemake --cores 32 --resources mem_mb=64000 --use-conda
 CI runs the **full pipeline end-to-end** on every push against a tiny
 paired-end fixture dataset (`test/`: two samples, 40 read pairs each, 300 bp
 reference, one planted heterozygous SNP). The run covers trimming →
-alignment → marking → HaplotypeCaller → GenomicsDBImport → GenotypeGVCFs →
-filtering → stats → MultiQC, and fails if the planted SNP is not called.
+alignment → QC gates → marking → HaplotypeCaller → GenomicsDBImport →
+GenotypeGVCFs → filtering → stats → MultiQC, and fails if the planted SNP
+is not called. Unit tests run first and cover the typed sample sheet
+(`tests/test_sample_sheet.py`: schema, type router, loud rejection of
+unimplemented types) and the QC gate evaluator
+(`tests/test_qc_gates.py`: parsing, thresholds, failure exit code).
 To reproduce locally:
 
 ```bash

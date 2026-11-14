@@ -7,6 +7,7 @@ Portable Snakemake workflow with GATK or Parabricks (GPU) support.
 import os
 import re
 import sys
+import json
 import pandas as pd
 from pathlib import Path
 from snakemake.utils import validate
@@ -77,15 +78,15 @@ USE_EXISTING_BAM = config["tools"].get("parabricks", {}).get("use_existing_bam",
 
 # Typed sample sheet: every sample declares its type; validated against
 # workflow/schemas/samples.schema.yaml before any rule runs.
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(workflow.snakefile)), "scripts"))
+_WORKFLOW_DIR = os.path.dirname(os.path.abspath(workflow.snakefile))
+SCRIPTS_DIR = os.path.join(_WORKFLOW_DIR, "scripts")
+sys.path.insert(0, SCRIPTS_DIR)
 from sample_sheet import load_samples, require_implemented_types, samples_by_type
 
 SAMPLES = load_samples(
     SAMPLES_SHEET,
     FASTQ_DIR,
-    schema_path=os.path.join(
-        os.path.dirname(os.path.abspath(workflow.snakefile)), "schemas", "samples.schema.yaml"
-    ),
+    schema_path=os.path.join(_WORKFLOW_DIR, "schemas", "samples.schema.yaml"),
 )
 SAMPLE_NAMES = [s["sample"] for s in SAMPLES]
 
@@ -93,6 +94,18 @@ SAMPLE_NAMES = [s["sample"] for s in SAMPLES]
 IMPLEMENTED_TYPES = {"individual_wgs"}
 require_implemented_types(SAMPLES, IMPLEMENTED_TYPES)
 SAMPLES_BY_TYPE = samples_by_type(SAMPLES)
+
+# QC gates: thresholds from config `qc:` (defaults mirror config.yaml);
+# evaluated per sample after flagstat/coverage, before variant calling.
+QC_GATES = {
+    "enabled": True,
+    "min_mapping_rate": 0.80,
+    "min_coverage_depth": 10,
+    "min_genome_fraction_covered": 0.80,
+    "max_duplicate_rate": 0.50,
+    **(config.get("qc") or {}),
+}
+GATE_FILES = expand(f"{QC_DIR}/gates/{{sample}}.gate.tsv", sample=SAMPLE_NAMES)
 
 def load_interval_chunks(fai_path, n_chunks):
     """Split whole contigs from a .fai into ~n balanced comma-joined interval
@@ -171,7 +184,8 @@ rule all:
         expand(f"{QC_DIR}/coverage/{{sample}}.coverage.txt", sample=SAMPLE_NAMES),
         expand(f"{QC_DIR}/fastp/{{sample}}_fastp.html", sample=SAMPLE_NAMES),
         f"{VARIANT_DIR}/variant_summary.tsv",
-        f"{QC_DIR}/alignment_summary.tsv"
+        f"{QC_DIR}/alignment_summary.tsv",
+        f"{QC_DIR}/gates/summary.tsv"
 
 # ============================================================
 # PARABRICKS RULES (GPU)
@@ -266,6 +280,7 @@ if USE_PARABRICKS:
         rule pbrun_variant_call:
             input:
                 bam=CALL_BAM,
+                gate=f"{QC_DIR}/gates/{{sample}}.gate.tsv",
                 ref=REF_ABS,
                 fai=REF_FAI,
                 dictf=REF_DICT
@@ -295,6 +310,7 @@ if USE_PARABRICKS:
         rule pbrun_variant_call:
             input:
                 bam=CALL_BAM,
+                gate=f"{QC_DIR}/gates/{{sample}}.gate.tsv",
                 ref=REF_ABS,
                 fai=REF_FAI,
                 dictf=REF_DICT
@@ -392,6 +408,7 @@ else:
     rule haplotype_caller:
         input:
             bam=CALL_BAM,
+            gate=f"{QC_DIR}/gates/{{sample}}.gate.tsv",
             ref=REF_ABS,
             fai=REF_FAI,
             dictf=REF_DICT
@@ -458,6 +475,7 @@ if USE_PARABRICKS and PARABRICKS_MODE == "deepvariant":
     rule genotype_gvcfs:
         input:
             gvcfs=expand(f"{VARIANT_DIR}/{{sample}}.g.vcf.gz", sample=SAMPLE_NAMES),
+            gates=GATE_FILES,
             ref=REF_ABS
         output:
             vcf=f"{VARIANT_DIR}/cohort.raw.vcf.gz",
@@ -484,6 +502,7 @@ else:
     rule genotype_gvcfs:
         input:
             gvcfs=expand(f"{VARIANT_DIR}/{{sample}}.g.vcf.gz", sample=SAMPLE_NAMES),
+            gates=GATE_FILES,
             ref=REF_ABS,
             fai=REF_FAI,
             dictf=REF_DICT
@@ -566,6 +585,50 @@ rule coverage:
         mkdir -p {QC_DIR}/coverage {LOGS_DIR}/coverage
         samtools coverage {input.bam} > {output} 2> {log}
         """
+
+# QC gate: PASS/FAIL per sample from flagstat + coverage vs config qc:
+# thresholds. Fails the sample (blocking its variant calling) when a
+# threshold is not met; qc.enabled=false turns it into report-only SKIP.
+rule qc_gate:
+    input:
+        flagstat=f"{QC_DIR}/flagstat/{{sample}}.flagstat.txt",
+        coverage=f"{QC_DIR}/coverage/{{sample}}.coverage.txt"
+    output:
+        tsv=f"{QC_DIR}/gates/{{sample}}.gate.tsv"
+    params:
+        gates=lambda wildcards: json.dumps(QC_GATES)
+    log: f"{LOGS_DIR}/qc_gate/{{sample}}.log"
+    conda: "../config/environment.yaml"
+    shell:
+        """
+        mkdir -p {QC_DIR}/gates {LOGS_DIR}/qc_gate
+        python {SCRIPTS_DIR}/qc_gates.py \
+            --sample {wildcards.sample} \
+            --flagstat {input.flagstat} \
+            --coverage {input.coverage} \
+            --gates '{params.gates}' \
+            --out {output.tsv} \
+            2> {log} || {{ cat {log} >&2; exit 1; }}
+        """
+
+rule qc_gate_summary:
+    input: GATE_FILES
+    output: f"{QC_DIR}/gates/summary.tsv"
+    log: f"{LOGS_DIR}/qc_gate_summary.log"
+    run:
+        rows = []
+        header = None
+        for f in input:
+            with open(f) as fh:
+                file_header = fh.readline().rstrip("\n")
+                if header is None:
+                    header = file_header
+                for line in fh:
+                    rows.append(line.rstrip("\n"))
+        Path(output[0]).parent.mkdir(parents=True, exist_ok=True)
+        with open(output[0], "w") as out:
+            out.write(header + "\n")
+            out.write("\n".join(rows) + "\n")
 
 rule filter_variants:
     input:

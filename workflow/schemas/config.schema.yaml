@@ -80,7 +80,17 @@ properties:
           mode: {type: string, enum: [deepvariant, haplotypecaller]}
           use_existing_bam: {type: boolean}
   execution: {type: object}
-  qc: {type: object}
+  qc:
+    type: object
+    description: >
+      Per-sample QC gates evaluated after alignment, before variant calling.
+      Fractions are 0-1; mean_depth is genome-wide (samtools coverage).
+    properties:
+      enabled: {type: boolean, default: true}
+      min_mapping_rate: {type: number, minimum: 0, maximum: 1, default: 0.80}
+      min_coverage_depth: {type: number, minimum: 0, default: 10}
+      min_genome_fraction_covered: {type: number, minimum: 0, maximum: 1, default: 0.80}
+      max_duplicate_rate: {type: number, minimum: 0, maximum: 1, default: 0.50}
   reporting: {type: object}
 definitions:
   filterSet:
