@@ -429,7 +429,10 @@ rejection of unimplemented types, CI fixture routing), the QC gate evaluator
 pileup/allele-count report (`tests/test_pileup_report.py`: mpileup parsing,
 candidate emission, target statuses, MAPQ-0 audit), and the filter-tag
 preflight (`tests/test_filter_tags.py`: expression parsing, missing-tag
-detection across caller headers). To reproduce locally (without touching
+detection across caller headers), and the config schema
+(`tests/test_config_schema.py`: shipped configs validate, qc/pool_seq/
+filter-set/targets blocks present, out-of-range values rejected). To
+reproduce locally (without touching
 your `config/config.local.yaml`):
 
 ```bash

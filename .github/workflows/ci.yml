@@ -16,13 +16,14 @@ jobs:
           environment-file: config/environment.yaml
           cache-environment: true
 
-      - name: Validate sample sheet schema, router, QC gates, filter tags
+      - name: Validate sample sheet schema, router, QC gates, filter tags, config schema
         shell: bash -el {0}
         run: |
           python tests/test_sample_sheet.py
           python tests/test_qc_gates.py
           python tests/test_pileup_report.py
           python tests/test_filter_tags.py
+          python tests/test_config_schema.py
 
       - name: Index test reference
         shell: bash -el {0}

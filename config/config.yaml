@@ -115,8 +115,9 @@ execution:
   # Restart from specific rule
   restart_from: ""
 
-# Quality control thresholds
+# Quality control thresholds (qc.enabled: false = report-only, never fails)
 qc:
+  enabled: true
   min_mapping_rate: 0.80
   min_coverage_depth: 10
   min_genome_fraction_covered: 0.80
