@@ -122,8 +122,29 @@ qc:
   min_genome_fraction_covered: 0.80
   max_duplicate_rate: 0.50
 
+# Pool-seq branch (allele counting instead of diploid genotyping)
+pool_seq:
+  # samtools mpileup filters (BAQ disabled, overlapping mates removed)
+  max_depth: 100000
+  min_base_quality: 13
+  # Second pass for the MAPQ-0 audit in the targeted-sites report
+  min_mapq_pass: 1
+  # Genome-wide counts emit only candidate polymorphic positions:
+  # non-ref support >= min_alt_reads AND max-alt AF >= min_alt_af
+  min_alt_reads: 2
+  min_alt_af: 0.01
+
 # Reporting
 reporting:
   multiqc: true
   summary_table: true
   vcf_stats: true
+  # Targeted-sites report: read-level counts at known positions, always
+  # reported even when callers emit reference-only (e.g. F1534C, whose
+  # entire coverage is MAPQ 0 against a paralogous copy).
+  # Literature V410L/V1016I/F1534C use the Musca domestica numbering;
+  # RefSeq X1 residues differ (408/1012/1554) — see README Validation.
+  targets:
+    - {name: V410L,  chrom: NC_035109.1, pos: 316080722, ref: C, alt: A}
+    - {name: V1016I, chrom: NC_035109.1, pos: 315983763, ref: C, alt: T}
+    - {name: F1534C, chrom: NC_035109.1, pos: 315939224, ref: A, alt: C}

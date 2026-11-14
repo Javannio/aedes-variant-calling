@@ -11,6 +11,7 @@ A portable, reproducible Snakemake workflow for germline variant calling in *Aed
 - **Reproducible**: Conda environments pin exact tool versions
 - **Flexible**: Accepts FASTQ files directly or downloads from SRA
 - **Standard QC**: fastp trimming (both modes), read-group-tagged alignment, duplicate marking, MultiQC; per-sample QC gates block low-quality samples before variant calling
+- **Pool-seq support**: `pool_seq` samples skip diploid genotyping and get read-level allele counts instead, plus a targeted-sites report (kdr V410L/V1016I/F1534C) that reports ambiguous sites even when callers emit reference-only
 - **Best-practice hard filtering**: SNP/indel split with type-specific thresholds; per-genotype DP/GQ masking; optional repeat-exclusion BED
 - **Comprehensive reporting**: Per-sample and cohort-level QC, variant statistics, MultiQC dashboard
 
@@ -34,20 +35,27 @@ alignment ──► Markdup BAM                (BWA-MEM + samtools markdup, or p
 BQSR (optional) ──► Recalibrated BAM     (skipped unless known-sites VCF provided)
     │
     ▼
-variant calling ──► per-sample GVCF
+type router ──┬─ individual_wgs: variant calling ──► per-sample GVCF
+    │         │
+    │         ├─ GPU mode:   pbrun deepvariant --gvcf
+    │         │                 → GLnexus (DeepVariant config; true joint genotyping)
+    │         │                 → cohort VCF
+    │         │
+    │         └─ CPU mode:   gatk HaplotypeCaller --emit-ref-confidence GVCF
+    │                       (scattered: balanced whole-contig chunks, gathered back)
+    │                       → gatk GenomicsDBImport (contig intervals merged into
+    │                         ~N GenomicsDB arrays — slow on fragmented refs otherwise)
+    │                       → gatk GenotypeGVCFs (gendb:// workspace)
+    │         │
+    │         └─ pool_seq:   mpileup allele counts ──► *.allele_counts.tsv.gz
+    │                       (no diploid GT — pools are allele frequencies)
     │
-    ├─ GPU mode:   pbrun deepvariant --gvcf
-    │                 → GLnexus (DeepVariant config; true joint genotyping)
-    │                 → cohort VCF
-    │
-    └─ CPU mode:   gatk HaplotypeCaller --emit-ref-confidence GVCF
-                      (scattered: balanced whole-contig chunks, gathered back)
-                      → gatk GenomicsDBImport (contig intervals merged into
-                        ~N GenomicsDB arrays — slow on fragmented refs otherwise)
-                      → gatk GenotypeGVCFs (gendb:// workspace)
-    │
+    ├─ all samples: targeted-sites report ──► variants/targets_report.tsv
+    │                  (read-level ref/alt counts at config reporting.targets,
+    │                   with/without ambiguous MAPQ-0 reads; e.g. F1534C is
+    │                   always visible there even when callers say reference)
     ▼
-bcftools hard filtering ──► Filtered cohort VCF
+bcftools hard filtering ──► Filtered cohort VCF   (individual_wgs only)
     │   - SNPs and indels filtered separately
     │   - low-DP/low-GQ genotypes masked to ./. (not site-removed)
     │   - optional: regions in exclude_bed (e.g. RepeatMasker) skipped
@@ -141,9 +149,11 @@ AeAeg_002	individual_wgs	2	AaegL5		data/fastq/AeAeg_002_R1.fastq.gz	data/fastq/A
 | `group` | no | Free-text group label (e.g. `dead`, `kdr`) |
 
 Type-specific rules (enforced by schema):
-- `pool_seq` requires `pool_size` and forbids `ploidy` (pools are counted as
-  allele frequencies, not diploid genotypes — Phase 3 branch).
-- `individual_wgs` / `mito` / `long_read` accept `ploidy`, forbid `pool_size`.
+- `pool_seq` requires `pool_size` and forbids `ploidy` — pools run the
+  allele-count branch (see "Pool-seq and targeted sites"), not diploid
+  genotyping.
+- `individual_wgs` / `mito` / `long_read` accept `ploidy`, forbid `pool_size`
+  (`mito`/`long_read` branches are not built yet and fail loudly at parse).
 
 **Option B: Auto-discovery from FASTQ directory**
 
@@ -200,6 +210,8 @@ structure mistakes fail at startup instead of mid-run:
 | `tools` | Tool-specific parameters (threads, filters, Parabricks settings) |
 | `execution` | Conda usage, dry-run, intermediate file retention |
 | `qc` | Per-sample QC gate thresholds (enforced before variant calling) |
+| `pool_seq` | mpileup filters and candidate-site criteria for the pool allele-count branch |
+| `reporting` | MultiQC toggles and the `targets` list for the targeted-sites report |
 
 ### QC gates
 
@@ -226,6 +238,45 @@ how many balanced whole-contig HaplotypeCaller chunks run in parallel (1 =
 disabled), and `genomicsdb_num_partitions` controls how many GenomicsDB
 arrays the contig intervals are merged into (0 = disabled; important for the
 ~1,900-contig AaegL5 reference).
+
+## Pool-seq and targeted sites
+
+`pool_seq` samples share alignment and QC gates with everyone else, then
+branch off **before** variant calling — a pool of 25 mosquitoes has no
+meaningful diploid GT, so forcing it through a germline caller would
+produce garbage genotypes (het/hom, GQ, VAF-as-genotype). Instead:
+
+**Allele counts** (`variants/<sample>.allele_counts.tsv.gz`): a whole-genome
+`samtools mpileup` (`-x -B -Q 13`, BAQ off, overlapping mates removed —
+the same methodology as the kdr validation) emits candidate polymorphic
+positions: non-ref support ≥ `pool_seq.min_alt_reads` **and** max-alt AF ≥
+`pool_seq.min_alt_af`. Columns are raw base counts plus `ref_count` and
+`max_alt_*`, so allele frequencies are computed from reads, not genotypes.
+
+**Targeted-sites report** (`variants/targets_report.tsv`, all samples):
+read-level counts at every position in `reporting.targets` (defaults: kdr
+V410L, V1016I, F1534C), computed from two mpileup passes — all reads, and
+MAPQ ≥ `pool_seq.min_mapq_pass` — so each site is reported **with and
+without ambiguous reads**:
+
+| Column | Meaning |
+|---|---|
+| `depth_total` / `depth_acgt` | all reads / ACGT+ref reads at the site |
+| `ref_count`, `alt_count`, `other_count` | configured ref, configured alt, remaining bases |
+| `af_alt` | alt / depth_acgt (strict) |
+| `af_alt_incl_ambiguous` | alt / depth_total (includes N/deletions) |
+| `mapq0_fraction` | fraction of reads that fail the MAPQ pass |
+| `status` | `OK`, `MAPQ0_ONLY` (no read passes MAPQ — the F1534C paralog trap), `NO_COVERAGE`, `REF_MISSING`, `OUT_OF_RANGE`, `REF_MISMATCH` |
+
+This is how F1534C stays visible: every read there is MAPQ 0 against an
+identical paralogous copy, so callers emit reference-only gVCFs, but the
+report shows `MAPQ0_ONLY` with the raw counts (42/42 in the resistant
+pool, ~85% in the susceptible pool — see Validation Results). Literature
+positions use *Musca domestica* numbering; the RefSeq X1 residues differ
+(V410L→408, V1016I→1012, F1534C→1554).
+
+Outputs are built only for the types present: a pool-only sheet never runs
+joint genotyping, a individual-only sheet never runs mpileup counting.
 
 ## Variant Filtering
 
@@ -299,6 +350,9 @@ element-rich regions.
 │   ├── cohort.raw.vcf.gz      # Merged cohort VCF
 │   ├── cohort.filtered.vcf.gz # Hard-filtered cohort VCF
 │   ├── *.filtered.vcf.gz      # Per-sample filtered VCFs
+│   ├── *.allele_counts.tsv.gz # Pool-seq candidate allele counts (pool_seq)
+│   ├── targets/               # Per-sample targeted-sites reports
+│   ├── targets_report.tsv     # Combined targeted-sites report (all samples)
 │   ├── *.variant_stats.txt    # bcftools stats per sample
 │   └── variant_summary.tsv    # Cohort variant summary
 ├── qc/
@@ -359,8 +413,11 @@ alignment → QC gates → marking → HaplotypeCaller → GenomicsDBImport →
 GenotypeGVCFs → filtering → stats → MultiQC, and fails if the planted SNP
 is not called. Unit tests run first and cover the typed sample sheet
 (`tests/test_sample_sheet.py`: schema, type router, loud rejection of
-unimplemented types) and the QC gate evaluator
-(`tests/test_qc_gates.py`: parsing, thresholds, failure exit code).
+unimplemented types), the QC gate evaluator
+(`tests/test_qc_gates.py`: parsing, thresholds, failure exit code), and the
+pileup/allele-count report (`tests/test_pileup_report.py`: mpileup parsing,
+candidate emission, target statuses, MAPQ-0 audit). CI also asserts the
+targeted-sites report finds the planted SNP with an AF between 0.25–0.75.
 To reproduce locally:
 
 ```bash

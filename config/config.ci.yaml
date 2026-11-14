@@ -14,3 +14,10 @@ tools:
   java_mem: "2g"
   parabricks:
     enabled: false
+
+# The planted heterozygous SNP in test/ref/tiny.fa — exercises the
+# targeted-sites report end-to-end in CI (default kdr targets do not
+# exist on the tiny reference).
+reporting:
+  targets:
+    - {name: planted_snp, chrom: tiny_contig, pos: 151, ref: C, alt: G}

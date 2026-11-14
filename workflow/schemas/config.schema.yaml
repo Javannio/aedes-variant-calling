@@ -91,7 +91,35 @@ properties:
       min_coverage_depth: {type: number, minimum: 0, default: 10}
       min_genome_fraction_covered: {type: number, minimum: 0, maximum: 1, default: 0.80}
       max_duplicate_rate: {type: number, minimum: 0, maximum: 1, default: 0.50}
-  reporting: {type: object}
+  pool_seq:
+    type: object
+    description: >
+      Allele-count branch for pool_seq samples (mpileup filters and the
+      candidate-site emission criteria for genome-wide counts).
+    properties:
+      max_depth: {type: integer, minimum: 1, default: 100000}
+      min_base_quality: {type: integer, minimum: 0, default: 13}
+      min_mapq_pass: {type: integer, minimum: 0, default: 1}
+      min_alt_reads: {type: integer, minimum: 1, default: 2}
+      min_alt_af: {type: number, minimum: 0, maximum: 1, default: 0.01}
+  reporting:
+    type: object
+    properties:
+      multiqc: {type: boolean}
+      summary_table: {type: boolean}
+      vcf_stats: {type: boolean}
+      targets:
+        type: array
+        description: Targeted-sites report positions (read-level counts)
+        items:
+          type: object
+          required: [name, chrom, pos, ref, alt]
+          properties:
+            name: {type: string, minLength: 1}
+            chrom: {type: string, minLength: 1}
+            pos: {type: integer, minimum: 1}
+            ref: {type: string, pattern: "^[ACGTNacgtn]$", maxLength: 1}
+            alt: {type: string, pattern: "^[ACGTNacgtn]$", maxLength: 1}
 definitions:
   filterSet:
     type: object
