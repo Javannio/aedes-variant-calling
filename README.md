@@ -415,27 +415,28 @@ snakemake --cores 32 --resources mem_mb=64000 --use-conda
 ## Testing
 
 CI runs the **full pipeline end-to-end** on every push against a tiny
-paired-end fixture dataset (`test/`: two samples, 40 read pairs each, 300 bp
-reference, one planted heterozygous SNP). The run covers trimming →
-alignment → QC gates → marking → HaplotypeCaller → GenomicsDBImport →
-GenotypeGVCFs → filtering → stats → MultiQC, and fails if the planted SNP
-is not called. Unit tests run first and cover the typed sample sheet
-(`tests/test_sample_sheet.py`: schema, type router, loud rejection of
-unimplemented types), the QC gate evaluator
-(`tests/test_qc_gates.py`: parsing, thresholds, failure exit code), and the
+paired-end fixture dataset (`test/`: two diploid samples plus one `pool_seq`
+fixture reusing one pair's reads, 40 read pairs each, 300 bp reference, one
+planted heterozygous SNP). The run covers trimming → alignment → QC gates →
+marking → HaplotypeCaller → GenomicsDBImport → GenotypeGVCFs → filtering →
+stats → MultiQC for the diploid samples, and allele counting + the
+targeted-sites report for the pool — and fails if the planted SNP is not
+called, absent as a pool allele-count candidate, or missing from the pool's
+targeted-sites row (AF 0.25–0.75). Unit tests run first and cover the typed
+sample sheet (`tests/test_sample_sheet.py`: schema, type router, loud
+rejection of unimplemented types, CI fixture routing), the QC gate evaluator
+(`tests/test_qc_gates.py`: parsing, thresholds, failure exit code), the
 pileup/allele-count report (`tests/test_pileup_report.py`: mpileup parsing,
 candidate emission, target statuses, MAPQ-0 audit), and the filter-tag
 preflight (`tests/test_filter_tags.py`: expression parsing, missing-tag
-detection across caller headers). CI also asserts the
-targeted-sites report finds the planted SNP with an AF between 0.25–0.75.
-To reproduce locally:
+detection across caller headers). To reproduce locally (without touching
+your `config/config.local.yaml`):
 
 ```bash
 bash test/make_fixtures.sh
 bwa index test/ref/tiny.fa && samtools faidx test/ref/tiny.fa
 gatk CreateSequenceDictionary -R test/ref/tiny.fa
-cp config/config.ci.yaml config/config.local.yaml
-snakemake --cores 2
+snakemake --cores 2 --configfile config/config.ci.yaml
 ```
 
 ## Provenance: Changes from tb-genomics-pipeline

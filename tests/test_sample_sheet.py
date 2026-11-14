@@ -40,12 +40,18 @@ def expect_fail(fn, needle, label):
 
 
 def main():
-    # 1. The CI sheet loads and is typed
+    # 1. The CI sheet loads, is typed, and routes (2 diploid + 1 pool fixture)
     samples = load_samples(CI_SHEET, "", SCHEMA)
-    assert len(samples) == 2, "CI sheet should have 2 samples"
-    assert all(s["type"] == "individual_wgs" for s in samples)
-    assert all(s["ploidy"] == 2 for s in samples)
-    print("ok: CI sheet loads as typed individual_wgs with ploidy default 2")
+    assert len(samples) == 3, "CI sheet should have 3 samples"
+    by_type = samples_by_type(samples)
+    assert len(by_type["individual_wgs"]) == 2, "2 individual_wgs expected"
+    assert len(by_type["pool_seq"]) == 1, "1 pool_seq fixture expected"
+    pool = by_type["pool_seq"][0]
+    assert pool["sample"] == "test_pool" and pool["pool_size"] == 25
+    assert pool["ploidy"] is None, "pool must not declare ploidy"
+    assert all(s["ploidy"] == 2 for s in by_type["individual_wgs"])
+    require_implemented_types(samples, {"individual_wgs", "pool_seq"})
+    print("ok: CI sheet routes 2 individual_wgs + 1 pool_seq fixture")
 
     # 2. Valid individual row (user's example shape)
     path = write_sheet(

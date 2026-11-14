@@ -1,5 +1,7 @@
 # CI config: copied to config/config.local.yaml by .github/workflows/ci.yml.
 # Merged over config/config.yaml (deep merge), so only overrides live here.
+# The CI sheet (config/ci_samples.tsv) holds two individual_wgs samples plus
+# one pool_seq fixture (test_pool) that exercises the pool branch.
 reference:
   fasta: "test/ref/tiny.fa"
   index_prefix: "test/ref/tiny.fa"
