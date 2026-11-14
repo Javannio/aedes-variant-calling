@@ -747,7 +747,8 @@ rule target_report_summary:
 rule filter_variants:
     input:
         vcf=f"{VARIANT_DIR}/cohort.raw.vcf.gz",
-        ref=REF_FASTA
+        ref=REF_FASTA,
+        fai=REF_FAI
     output:
         vcf=f"{VARIANT_DIR}/cohort.filtered.vcf.gz",
         tbi=f"{VARIANT_DIR}/cohort.filtered.vcf.gz.tbi"
@@ -757,16 +758,28 @@ rule filter_variants:
     shell:
         """
         mkdir -p {VARIANT_DIR} {LOGS_DIR}
+        # Fail loudly if an expression references tags this VCF lacks
+        # (bcftools treats missing tags as false -> filters silently pass).
+        python {SCRIPTS_DIR}/check_filter_tags.py \
+            --vcf {input.vcf} --caller {CALLER} \
+            --snp-filter '{SNP_FILTER}' \
+            --indel-filter '{INDEL_FILTER}' \
+            --geno-filter '{GENO_FILTER}' \
+            || {{ echo "Filter tag preflight failed (see above)"; exit 1; }}
         EXCLUDE=""
         if [ -n "{EXCLUDE_BED}" ] && [ -f "{EXCLUDE_BED}" ]; then
             EXCLUDE="-T ^{EXCLUDE_BED}"
         fi
-        bcftools view -m2 -M2 -v snps $EXCLUDE -Ou {input.vcf} 2> {log} \
-            | bcftools filter -e '{SNP_FILTER}' -s SNP_HARDFAIL -Ou 2>> {log} \
+        # Split multiallelics first (norm -m -any): every alternate allele is
+        # then evaluated separately instead of being dropped by -m2 -M2.
+        bcftools norm -m -any -f {input.ref} -Ou {input.vcf} 2> {log} \
+            | bcftools view -m2 -M2 -v snps $EXCLUDE -Ou - 2>> {log} \
+            | bcftools filter -e '{SNP_FILTER}' -s SNP_HARDFAIL -Ou - 2>> {log} \
             | bcftools filter -e '{GENO_FILTER}' -S . -Oz -o {VARIANT_DIR}/.snps.tmp.vcf.gz 2>> {log}
         bcftools index -t {VARIANT_DIR}/.snps.tmp.vcf.gz
-        bcftools view -m2 -M2 -v indels $EXCLUDE -Ou {input.vcf} 2>> {log} \
-            | bcftools filter -e '{INDEL_FILTER}' -s INDEL_HARDFAIL -Ou 2>> {log} \
+        bcftools norm -m -any -f {input.ref} -Ou {input.vcf} 2>> {log} \
+            | bcftools view -m2 -M2 -v indels $EXCLUDE -Ou - 2>> {log} \
+            | bcftools filter -e '{INDEL_FILTER}' -s INDEL_HARDFAIL -Ou - 2>> {log} \
             | bcftools filter -e '{GENO_FILTER}' -S . -Oz -o {VARIANT_DIR}/.indels.tmp.vcf.gz 2>> {log}
         bcftools index -t {VARIANT_DIR}/.indels.tmp.vcf.gz
         bcftools concat -a -Oz -o {output.vcf} \

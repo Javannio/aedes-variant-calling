@@ -293,12 +293,20 @@ defaults (selected automatically from `tools.bcftools.deepvariant` vs
 GATK-only annotations (`QD`, `MQ`, `FS`, `SOR`, `ReadPosRankSum`) appear only
 in the GATK set because GenotypeGVCFs guarantees them; GLnexus output lacks
 them and missing tags make bcftools filter expressions silently pass — so the
-two callers keep separate expressions (see comments in `config.yaml`).
+two callers keep separate expressions (see comments in `config.yaml`), and
+`filter_variants` runs a **tag preflight** first
+(`workflow/scripts/check_filter_tags.py`): if an expression references a
+tag the VCF header lacks, the rule fails with the missing tags and the
+caller hint instead of silently not filtering.
+
+Multiallelic sites are **split before filtering** (`bcftools norm -m -any`
+against the reference), so every alternate allele is evaluated separately
+instead of being dropped by the old `-m2 -M2` selection.
 
 Note: cohort-level `INFO/DP` sums depth across all samples and scales with
 cohort size — depth is therefore enforced at the **genotype** level, so a
 weak sample's call is masked without deleting a site that other samples
-support. Multiallelic sites are excluded from the filtered output.
+support.
 
 ## Repeat Masking and Mappability
 
@@ -416,7 +424,9 @@ is not called. Unit tests run first and cover the typed sample sheet
 unimplemented types), the QC gate evaluator
 (`tests/test_qc_gates.py`: parsing, thresholds, failure exit code), and the
 pileup/allele-count report (`tests/test_pileup_report.py`: mpileup parsing,
-candidate emission, target statuses, MAPQ-0 audit). CI also asserts the
+candidate emission, target statuses, MAPQ-0 audit), and the filter-tag
+preflight (`tests/test_filter_tags.py`: expression parsing, missing-tag
+detection across caller headers). CI also asserts the
 targeted-sites report finds the planted SNP with an AF between 0.25–0.75.
 To reproduce locally:
 

@@ -61,3 +61,12 @@ __pycache__/
 config/config.local.yaml
 Snakefile.bak
 workflow/Snakefile.bak
+
+# Generated test-reference indexes (rebuilt by CI / test/make_fixtures.sh)
+test/ref/tiny.fa.amb
+test/ref/tiny.fa.ann
+test/ref/tiny.fa.bwt
+test/ref/tiny.fa.fai
+test/ref/tiny.fa.pac
+test/ref/tiny.fa.sa
+test/ref/tiny.dict
