@@ -16,6 +16,10 @@ jobs:
           environment-file: config/environment.yaml
           cache-environment: true
 
+      - name: Validate typed sample sheet (schema + router)
+        shell: bash -el {0}
+        run: python tests/test_sample_sheet.py
+
       - name: Index test reference
         shell: bash -el {0}
         run: |

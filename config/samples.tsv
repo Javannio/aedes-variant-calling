@@ -1,3 +1,3 @@
-sample	fastq_r1	fastq_r2
-SRR14609304	/home/romar/reads/SRR14609304_1.trim.fastq	/home/romar/reads/SRR14609304_2.trim.fastq
-SRR14609308	/home/romar/reads/SRR14609308_1.trim.fastq	/home/romar/reads/SRR14609308_2.trim.fastq
+sample	type	ploidy	pool_size	reference	group	fastq_r1	fastq_r2
+SRR14609304	pool_seq		25	AaegL5	dead	/home/romar/reads/SRR14609304_1.trim.fastq	/home/romar/reads/SRR14609304_2.trim.fastq
+SRR14609308	pool_seq		25	AaegL5	kdr	/home/romar/reads/SRR14609308_1.trim.fastq	/home/romar/reads/SRR14609308_2.trim.fastq

@@ -6,6 +6,7 @@ Portable Snakemake workflow with GATK or Parabricks (GPU) support.
 
 import os
 import re
+import sys
 import pandas as pd
 from pathlib import Path
 from snakemake.utils import validate
@@ -74,30 +75,24 @@ PARABRICKS_IMAGE = config["tools"].get("parabricks", {}).get("image", "nvcr.io/n
 PARABRICKS_MODE = config["tools"].get("parabricks", {}).get("mode", "deepvariant")
 USE_EXISTING_BAM = config["tools"].get("parabricks", {}).get("use_existing_bam", False)  # "deepvariant" or "haplotypecaller"
 
-def load_samples(sheet_path, fastq_dir):
-    samples = []
-    if sheet_path and os.path.exists(sheet_path):
-        df = pd.read_csv(sheet_path, sep="\t")
-        required_cols = ["sample", "fastq_r1", "fastq_r2"]
-        if not all(col in df.columns for col in required_cols):
-            raise ValueError(f"Sample sheet must have columns: {required_cols}")
-        for _, row in df.iterrows():
-            samples.append({"sample": row["sample"], "r1": row["fastq_r1"], "r2": row["fastq_r2"]})
-    elif fastq_dir and os.path.exists(fastq_dir):
-        fastq_files = list(Path(fastq_dir).glob("*_R1_*.fastq.gz"))
-        for r1 in fastq_files:
-            sample = r1.name.split("_R1_")[0]
-            r2 = r1.parent / r1.name.replace("_R1_", "_R2_")
-            if r2.exists():
-                samples.append({"sample": sample, "r1": str(r1), "r2": str(r2)})
-            else:
-                print(f"Warning: No matching R2 for {r1}")
-    else:
-        raise ValueError("No samples found. Provide samples.tsv or fastq_dir in config.")
-    return samples
+# Typed sample sheet: every sample declares its type; validated against
+# workflow/schemas/samples.schema.yaml before any rule runs.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(workflow.snakefile)), "scripts"))
+from sample_sheet import load_samples, require_implemented_types, samples_by_type
 
-SAMPLES = load_samples(SAMPLES_SHEET, FASTQ_DIR)
+SAMPLES = load_samples(
+    SAMPLES_SHEET,
+    FASTQ_DIR,
+    schema_path=os.path.join(
+        os.path.dirname(os.path.abspath(workflow.snakefile)), "schemas", "samples.schema.yaml"
+    ),
+)
 SAMPLE_NAMES = [s["sample"] for s in SAMPLES]
+
+# Type router: branches that exist run; branches not built yet fail loudly.
+IMPLEMENTED_TYPES = {"individual_wgs"}
+require_implemented_types(SAMPLES, IMPLEMENTED_TYPES)
+SAMPLES_BY_TYPE = samples_by_type(SAMPLES)
 
 def load_interval_chunks(fai_path, n_chunks):
     """Split whole contigs from a .fai into ~n balanced comma-joined interval

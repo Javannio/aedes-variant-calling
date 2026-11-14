@@ -116,12 +116,31 @@ Key settings to modify:
 
 **Option A: Sample Sheet (recommended)**
 
-Create `config/samples.tsv`:
+Create `config/samples.tsv`. Every row declares its **type** — the sheet is
+schema-validated (`workflow/schemas/samples.schema.yaml`) before any rule
+runs, and types whose branch is not implemented yet fail loudly at parse
+time:
+
 ```tsv
-sample	fastq_r1	fastq_r2
-AeAeg_001	data/fastq/AeAeg_001_R1.fastq.gz	data/fastq/AeAeg_001_R2.fastq.gz
-AeAeg_002	data/fastq/AeAeg_002_R1.fastq.gz	data/fastq/AeAeg_002_R2.fastq.gz
+sample	type	ploidy	pool_size	reference	group	fastq_r1	fastq_r2
+AeAeg_001	individual_wgs	2	AaegL5		data/fastq/AeAeg_001_R1.fastq.gz	data/fastq/AeAeg_001_R2.fastq.gz
+AeAeg_002	individual_wgs	2	AaegL5		data/fastq/AeAeg_002_R1.fastq.gz	data/fastq/AeAeg_002_R2.fastq.gz
 ```
+
+| Column | Required | Meaning |
+|---|---|---|
+| `sample` | yes | Unique sample name |
+| `type` | yes | `individual_wgs` \| `pool_seq` \| `mito` \| `long_read` |
+| `fastq_r1`, `fastq_r2` | yes | Paired FASTQ paths |
+| `ploidy` | no | Default 2 (`individual_wgs`/`long_read`), 1 (`mito`); must be empty for `pool_seq` |
+| `pool_size` | for `pool_seq` | Number of individuals pooled (≥ 2) |
+| `reference` | no | Free-text reference label (e.g. assembly name) |
+| `group` | no | Free-text group label (e.g. `dead`, `kdr`) |
+
+Type-specific rules (enforced by schema):
+- `pool_seq` requires `pool_size` and forbids `ploidy` (pools are counted as
+  allele frequencies, not diploid genotypes — Phase 3 branch).
+- `individual_wgs` / `mito` / `long_read` accept `ploidy`, forbid `pool_size`.
 
 **Option B: Auto-discovery from FASTQ directory**
 
@@ -378,7 +397,9 @@ the commands to reproduce them; the earlier pre-GLnexus run is in
 - Verify `reference.index_prefix` matches index files
 
 **No samples found**:
-- Check `samples.sheet` path and format (TSV with headers: sample, fastq_r1, fastq_r2)
+- Check `samples.sheet` path and format (TSV with headers: sample, type, fastq_r1, fastq_r2)
+- Every row must declare a valid `type` (`individual_wgs`, `pool_seq`, `mito`, `long_read`) — see "Prepare Samples"
+- `pool_seq` rows require `pool_size` (≥ 2); other types must leave `pool_size` empty
 - Or set `samples.fastq_dir` for auto-discovery
 
 **GPU mode: docker/gpus errors**:

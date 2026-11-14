@@ -1,0 +1,40 @@
+$schema: "http://json-schema.org/draft-07/schema#"
+title: Typed sample sheet
+description: >
+  One row per sample. Every sample declares its type; the parsed sheet is
+  validated against this schema before any rule runs. type drives the
+  type-specific branches (individual_wgs callset, pool_seq allele counting,
+  mito haploid calling, long_read).
+type: object
+required: [samples]
+properties:
+  samples:
+    type: array
+    minItems: 1
+    items:
+      type: object
+      required: [sample, type, fastq_r1, fastq_r2]
+      properties:
+        sample: {type: string, minLength: 1}
+        type: {type: string, enum: [individual_wgs, pool_seq, mito, long_read]}
+        fastq_r1: {type: string, minLength: 1}
+        fastq_r2: {type: string, minLength: 1}
+        ploidy: {type: [integer, "null"], minimum: 1}
+        pool_size: {type: [integer, "null"], minimum: 2}
+        reference: {type: [string, "null"]}
+        group: {type: [string, "null"]}
+      allOf:
+        # pool_size is only meaningful for pool_seq, and pool_seq requires it
+        - if: {required: [pool_size], properties: {pool_size: {type: integer}}}
+          then: {required: [type], properties: {type: {enum: [pool_seq]}}}
+        - if: {required: [type], properties: {type: {const: pool_seq}}}
+          then:
+            required: [pool_size]
+            properties:
+              pool_size: {type: integer, minimum: 2}
+              ploidy: {type: "null"}
+        # ploidy is only meaningful for called (non-pool) types
+        - if: {required: [ploidy], properties: {ploidy: {type: integer}}}
+          then:
+            required: [type]
+            properties: {type: {enum: [individual_wgs, mito, long_read]}}

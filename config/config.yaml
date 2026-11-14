@@ -18,7 +18,9 @@ reference:
 
 # Sample input configuration
 samples:
-  # Sample sheet file (TSV/CSV with columns: sample, fastq_r1, fastq_r2)
+  # Sample sheet (TSV): sample, type, ploidy, pool_size, reference, group,
+  # fastq_r1, fastq_r2 — type is required (individual_wgs | pool_seq | mito |
+  # long_read); the sheet is schema-validated before any rule runs (see README)
   sheet: "config/samples.tsv"
   # Alternative: directory containing FASTQ files (paired-end: *_R1_*.fastq.gz, *_R2_*.fastq.gz)
   fastq_dir: ""
